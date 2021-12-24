@@ -33,5 +33,5 @@ dual licensed as above, without any additional terms or conditions.
 This library uses examples provided by the [TinyVG/examples] repository in its
 integration tests. These examples are licensed under the [MIT License][mit-tinyvg].
 
-[TinyVG/examples](https://github.com/TinyVG/examples)
-[mit-tinyvg](https://github.com/TinyVG/examples/blob/b8d8c7e88ed221f2ce1100f9e25b5c6e7e6dc78d/LICENSE)
+[TinyVG/examples]: https://github.com/TinyVG/examples
+[mit-tinyvg]: https://github.com/TinyVG/examples/blob/b8d8c7e88ed221f2ce1100f9e25b5c6e7e6dc78d/LICENSE
