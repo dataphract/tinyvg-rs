@@ -4,7 +4,7 @@ use std::{
     ops::{BitAnd, Shl, Shr, Sub},
 };
 
-use byteorder::{ReadBytesExt, LE};
+use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 
 const MAGIC: [u8; 2] = [0x72, 0x56];
 const VERSION: u8 = 1;
@@ -13,7 +13,9 @@ const VERSION: u8 = 1;
 pub enum TinyVgError {
     Io(io::Error),
     InvalidData,
+    OutOfRange,
     Unsupported,
+    NoSuchColor,
 }
 
 impl From<io::Error> for TinyVgError {
@@ -108,10 +110,12 @@ trait WriteVarU32Ext: Write {
     }
 }
 
+impl<W: Write> WriteVarU32Ext for W {}
+
 // Colors =========================================================================================
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum ColorEncoding {
+pub enum ColorEncodingTag {
     Rgba8888 = 0,
     Rgb565 = 1,
     RgbaF32 = 2,
@@ -124,22 +128,6 @@ pub struct Rgba8888 {
     pub green: u8,
     pub blue: u8,
     pub alpha: u8,
-}
-
-impl Rgba8888 {
-    fn read_from<R: Read>(mut reader: R) -> io::Result<Rgba8888> {
-        let red = reader.read_u8()?;
-        let green = reader.read_u8()?;
-        let blue = reader.read_u8()?;
-        let alpha = reader.read_u8()?;
-
-        Ok(Rgba8888 {
-            red,
-            green,
-            blue,
-            alpha,
-        })
-    }
 }
 
 impl From<Rgb565> for Rgba8888 {
@@ -162,15 +150,6 @@ pub struct Rgb565 {
     bytes: [u8; 2],
 }
 
-impl Rgb565 {
-    fn read_from<R: Read>(mut reader: R) -> io::Result<Rgb565> {
-        let mut bytes = [0u8; 2];
-        reader.read_exact(&mut bytes)?;
-
-        Ok(Rgb565 { bytes })
-    }
-}
-
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct RgbaF32 {
     red: f32,
@@ -179,8 +158,81 @@ pub struct RgbaF32 {
     alpha: f32,
 }
 
-impl RgbaF32 {
-    fn read_from<R: Read>(mut reader: R) -> io::Result<RgbaF32> {
+impl TryFrom<u8> for ColorEncodingTag {
+    type Error = TinyVgError;
+
+    fn try_from(value: u8) -> Result<ColorEncodingTag, TinyVgError> {
+        use ColorEncodingTag::*;
+        match value {
+            0 => Ok(Rgba8888),
+            1 => Ok(Rgb565),
+            2 => Ok(RgbaF32),
+            3 => Ok(Custom),
+            _ => Err(TinyVgError::InvalidData),
+        }
+    }
+}
+
+pub trait ColorEncoding: Sized {
+    fn tag() -> ColorEncodingTag;
+    fn read_table_entry<R: Read>(reader: R) -> io::Result<Self>;
+    fn write_table_entry<W: Write>(&self, writer: W) -> Result<(), TinyVgError>;
+}
+
+impl ColorEncoding for Rgba8888 {
+    fn tag() -> ColorEncodingTag {
+        ColorEncodingTag::Rgba8888
+    }
+
+    fn read_table_entry<R: Read>(mut reader: R) -> io::Result<Self> {
+        let red = reader.read_u8()?;
+        let green = reader.read_u8()?;
+        let blue = reader.read_u8()?;
+        let alpha = reader.read_u8()?;
+
+        Ok(Rgba8888 {
+            red,
+            green,
+            blue,
+            alpha,
+        })
+    }
+
+    fn write_table_entry<W: Write>(&self, mut writer: W) -> Result<(), TinyVgError> {
+        writer.write_u8(self.red)?;
+        writer.write_u8(self.green)?;
+        writer.write_u8(self.blue)?;
+        writer.write_u8(self.alpha)?;
+
+        Ok(())
+    }
+}
+
+impl ColorEncoding for Rgb565 {
+    fn tag() -> ColorEncodingTag {
+        ColorEncodingTag::Rgb565
+    }
+
+    fn read_table_entry<R: Read>(mut reader: R) -> io::Result<Self> {
+        let mut bytes = [0u8; 2];
+        reader.read_exact(&mut bytes)?;
+
+        Ok(Rgb565 { bytes })
+    }
+
+    fn write_table_entry<W: Write>(&self, mut writer: W) -> Result<(), TinyVgError> {
+        writer.write_all(&self.bytes)?;
+
+        Ok(())
+    }
+}
+
+impl ColorEncoding for RgbaF32 {
+    fn tag() -> ColorEncodingTag {
+        ColorEncodingTag::RgbaF32
+    }
+
+    fn read_table_entry<R: Read>(mut reader: R) -> io::Result<Self> {
         let red = reader.read_f32::<LE>()?;
         let green = reader.read_f32::<LE>()?;
         let blue = reader.read_f32::<LE>()?;
@@ -194,20 +246,14 @@ impl RgbaF32 {
             alpha,
         })
     }
-}
 
-impl TryFrom<u8> for ColorEncoding {
-    type Error = TinyVgError;
+    fn write_table_entry<W: Write>(&self, mut writer: W) -> Result<(), TinyVgError> {
+        writer.write_f32::<LE>(self.red)?;
+        writer.write_f32::<LE>(self.green)?;
+        writer.write_f32::<LE>(self.blue)?;
+        writer.write_f32::<LE>(self.alpha)?;
 
-    fn try_from(value: u8) -> Result<ColorEncoding, TinyVgError> {
-        use ColorEncoding::*;
-        match value {
-            0 => Ok(Rgba8888),
-            1 => Ok(Rgb565),
-            2 => Ok(RgbaF32),
-            3 => Ok(Custom),
-            _ => Err(TinyVgError::InvalidData),
-        }
+        Ok(())
     }
 }
 
@@ -250,6 +296,39 @@ impl CoordinateRange {
             CoordinateRange::Default => CoordinateRange::read_default,
             CoordinateRange::Reduced => CoordinateRange::read_reduced,
             CoordinateRange::Enhanced => CoordinateRange::read_enhanced,
+        }
+    }
+
+    fn write_default<W: Write>(writer: &mut W, value: i32) -> Result<(), TinyVgError> {
+        let v = value.try_into().map_err(|_| TinyVgError::OutOfRange)?;
+        writer.write_i16::<LE>(v)?;
+
+        Ok(())
+    }
+
+    fn write_reduced<W: Write>(writer: &mut W, value: i32) -> Result<(), TinyVgError> {
+        let v = value.try_into().map_err(|_| TinyVgError::OutOfRange)?;
+        writer.write_i8(v)?;
+
+        Ok(())
+    }
+
+    fn write_enhanced<W: Write>(writer: &mut W, value: i32) -> Result<(), TinyVgError> {
+        writer.write_i32::<LE>(value)?;
+
+        Ok(())
+    }
+
+    /// Returns a function which writes the correct `Unit` width for this
+    /// `CoordinateRange`.
+    ///
+    /// The returned function writes unscaled unit values; the value passed in
+    /// by the caller should already be multiplied by the scaling factor.
+    fn write_fn<W: Write>(self) -> fn(&mut W, i32) -> Result<(), TinyVgError> {
+        match self {
+            CoordinateRange::Default => CoordinateRange::write_default,
+            CoordinateRange::Reduced => CoordinateRange::write_reduced,
+            CoordinateRange::Enhanced => CoordinateRange::write_enhanced,
         }
     }
 }
@@ -307,6 +386,16 @@ pub enum Style {
     },
 }
 
+impl Style {
+    fn id(&self) -> StyleId {
+        match self {
+            Style::FlatColor { .. } => StyleId::FlatColor,
+            Style::LinearGradient { .. } => StyleId::LinearGradient,
+            Style::RadialGradient { .. } => StyleId::RadialGradient,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Point {
     x: f32,
@@ -342,7 +431,7 @@ impl TryFrom<u8> for ArcSweep {
 // Paths ==========================================================================================
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum PathSegmentId {
+pub enum PathInstrId {
     Line = 0,
     HorizontalLine = 1,
     VerticalLine = 2,
@@ -353,8 +442,14 @@ pub enum PathSegmentId {
     QuadraticBezier = 7,
 }
 
+impl PathInstrId {
+    fn with_line_width(self, has_line_width: bool) -> u8 {
+        (has_line_width as u8) << 4 | self as u8
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
-pub enum SegmentKind {
+pub enum PathInstrKind {
     Line {
         to: Point,
     },
@@ -391,14 +486,19 @@ pub enum SegmentKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Segment {
-    kind: SegmentKind,
+pub struct PathInstr {
+    kind: PathInstrKind,
     line_width: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Path {
+pub struct Segment {
     start: Point,
+    instrs: Vec<PathInstr>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Path {
     segments: Vec<Segment>,
 }
 
@@ -421,6 +521,12 @@ pub enum CmdId {
     OutlineFillPoly = 8,
     OutlineFillRects = 9,
     OutlineFillPath = 10,
+}
+
+impl CmdId {
+    fn with_style_id(self, style: StyleId) -> u8 {
+        ((style as u8) << 6) | self as u8
+    }
 }
 
 impl TryFrom<u8> for CmdId {
@@ -450,10 +556,9 @@ impl TryFrom<u8> for CmdId {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cmd {
-    EndOfDocument,
     FillPoly {
         fill_style: Style,
-        polygon: Vec<Point>,
+        points: Vec<Point>,
     },
     FillRects {
         fill_style: Style,
@@ -506,7 +611,7 @@ pub enum Cmd {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TinyVgHeader {
     scale: u8,
-    encoding: ColorEncoding,
+    encoding: ColorEncodingTag,
     range: CoordinateRange,
     width: u32,
     height: u32,
@@ -518,6 +623,22 @@ pub struct TinyVg {
     table: ColorTable,
     cmds: Vec<Cmd>,
 }
+
+impl TinyVg {
+    pub fn header(&self) -> &TinyVgHeader {
+        &self.header
+    }
+
+    pub fn color_table(&self) -> &ColorTable {
+        &self.table
+    }
+
+    pub fn cmds(&self) -> &Vec<Cmd> {
+        &self.cmds
+    }
+}
+
+// TinyVG reading =================================================================================
 
 /// A TinyVG data stream reader.
 struct TinyVgReader<R: Read> {
@@ -601,23 +722,25 @@ impl<R: Read> TinyVgReader<R> {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    fn read_segment(&mut self) -> Result<Segment, TinyVgError> {
+    fn read_path_instr(&mut self) -> Result<PathInstr, TinyVgError> {
         let tag = self.reader.read_u8()?;
 
         let instr = tag.bits(0, 3);
         let has_line_width = tag.bits(4, 1) == 1;
 
+        let line_width = has_line_width.then(|| self.read_unit()).transpose()?;
+
         let kind = match instr {
-            0 => SegmentKind::Line {
+            0 => PathInstrKind::Line {
                 to: self.read_point()?,
             },
-            1 => SegmentKind::HorizontalLine {
+            1 => PathInstrKind::HorizontalLine {
                 to_x: self.read_unit()?,
             },
-            2 => SegmentKind::VerticalLine {
+            2 => PathInstrKind::VerticalLine {
                 to_y: self.read_unit()?,
             },
-            3 => SegmentKind::CubicBezier {
+            3 => PathInstrKind::CubicBezier {
                 control_0: self.read_point()?,
                 control_1: self.read_point()?,
                 to: self.read_point()?,
@@ -629,7 +752,7 @@ impl<R: Read> TinyVgReader<R> {
                 let radius = self.read_unit()?;
                 let to = self.read_point()?;
 
-                SegmentKind::ArcCircle {
+                PathInstrKind::ArcCircle {
                     large_arc,
                     sweep,
                     radius,
@@ -645,7 +768,7 @@ impl<R: Read> TinyVgReader<R> {
                 let rotation_deg = self.read_unit()?;
                 let to = self.read_point()?;
 
-                SegmentKind::ArcEllipse {
+                PathInstrKind::ArcEllipse {
                     large_arc,
                     sweep,
                     radius_x,
@@ -654,99 +777,106 @@ impl<R: Read> TinyVgReader<R> {
                     to,
                 }
             }
-            6 => SegmentKind::Close,
-            7 => SegmentKind::QuadraticBezier {
+            6 => PathInstrKind::Close,
+            7 => PathInstrKind::QuadraticBezier {
                 control: self.read_point()?,
                 to: self.read_point()?,
             },
             _ => return Err(TinyVgError::InvalidData),
         };
 
-        let line_width = has_line_width.then(|| self.read_unit()).transpose()?;
+        Ok(PathInstr { kind, line_width })
+    }
 
-        Ok(Segment { kind, line_width })
+    fn read_segment(&mut self) -> Result<Segment, TinyVgError> {
+        let instr_count = self.reader.read_var_u32()? + 1;
+        let start = self.read_point()?;
+        let instrs = iter::repeat_with(|| self.read_path_instr())
+            .take(instr_count as usize)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Segment { start, instrs })
     }
 
     fn read_path(&mut self, segment_count: u32) -> Result<Path, TinyVgError> {
-        let start = self.read_point()?;
         let segments = iter::repeat_with(|| self.read_segment())
             .take(segment_count as usize)
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Path { start, segments })
+        Ok(Path { segments })
     }
 
-    fn read_cmd(&mut self) -> Result<Cmd, TinyVgError> {
+    fn read_cmd(&mut self) -> Result<Option<Cmd>, TinyVgError> {
         let tag = self.reader.read_u8()?;
         let id = CmdId::try_from(tag.bits(0, 6))?;
         let prim_style = StyleId::try_from(tag.bits(6, 2))?;
 
         let cmd = match id {
-            CmdId::EndOfDocument => Cmd::EndOfDocument,
+            CmdId::EndOfDocument => None,
 
             CmdId::FillPoly => {
                 let point_count = self.reader.read_var_u32()? + 1;
-                Cmd::FillPoly {
+                Some(Cmd::FillPoly {
                     fill_style: self.read_style(prim_style)?,
-                    polygon: self.read_points(point_count)?,
-                }
+                    points: self.read_points(point_count)?,
+                })
             }
 
             CmdId::FillRects => {
                 let rect_count = self.reader.read_var_u32()? + 1;
 
-                Cmd::FillRects {
+                Some(Cmd::FillRects {
                     fill_style: self.read_style(prim_style)?,
                     rects: self.read_rects(rect_count)?,
-                }
+                })
             }
 
             CmdId::FillPath => {
                 let segment_count = self.reader.read_var_u32()? + 1;
 
-                Cmd::FillPath {
+                Some(Cmd::FillPath {
                     fill_style: self.read_style(prim_style)?,
                     path: self.read_path(segment_count)?,
-                }
+                })
             }
 
             CmdId::DrawLines => {
                 let line_count = self.reader.read_var_u32()? + 1;
 
-                Cmd::DrawLines {
+                Some(Cmd::DrawLines {
                     line_style: self.read_style(prim_style)?,
                     width: self.read_unit()?,
                     lines: self.read_lines(line_count)?,
-                }
+                })
             }
 
             CmdId::DrawLoop => {
                 let point_count = self.reader.read_var_u32()? + 1;
-                Cmd::DrawLoop {
+                Some(Cmd::DrawLoop {
                     line_style: self.read_style(prim_style)?,
                     width: self.read_unit()?,
                     points: self.read_points(point_count)?,
-                }
+                })
             }
 
             CmdId::DrawStrip => {
                 let point_count = self.reader.read_var_u32()? + 1;
 
-                Cmd::DrawStrip {
+                Some(Cmd::DrawStrip {
                     line_style: self.read_style(prim_style)?,
                     width: self.read_unit()?,
                     points: self.read_points(point_count)?,
-                }
+                })
             }
 
             CmdId::DrawPath => {
                 let segment_count = self.reader.read_var_u32()? + 1;
 
-                Cmd::DrawPath {
+                Some(Cmd::DrawPath {
                     line_style: self.read_style(prim_style)?,
                     width: self.read_unit()?,
                     path: self.read_path(segment_count)?,
-                }
+                })
             }
 
             CmdId::OutlineFillPoly => {
@@ -754,12 +884,12 @@ impl<R: Read> TinyVgReader<R> {
                 let point_count: u32 = (head.bits(0, 6) + 1).into();
                 let line_style_id = StyleId::try_from(head.bits(6, 2))?;
 
-                Cmd::OutlineFillPoly {
+                Some(Cmd::OutlineFillPoly {
                     fill_style: self.read_style(prim_style)?,
                     line_style: self.read_style(line_style_id)?,
                     line_width: self.read_unit()?,
                     points: self.read_points(point_count)?,
-                }
+                })
             }
 
             CmdId::OutlineFillRects => {
@@ -767,12 +897,12 @@ impl<R: Read> TinyVgReader<R> {
                 let rect_count: u32 = (head.bits(0, 6) + 1).into();
                 let line_style_id = StyleId::try_from(head.bits(6, 2))?;
 
-                Cmd::OutlineFillRects {
+                Some(Cmd::OutlineFillRects {
                     fill_style: self.read_style(prim_style)?,
                     line_style: self.read_style(line_style_id)?,
                     line_width: self.read_unit()?,
                     rects: self.read_rects(rect_count)?,
-                }
+                })
             }
 
             CmdId::OutlineFillPath => {
@@ -780,12 +910,12 @@ impl<R: Read> TinyVgReader<R> {
                 let segment_count: u32 = (head.bits(0, 6) + 1).into();
                 let line_style_id = StyleId::try_from(head.bits(6, 2))?;
 
-                Cmd::OutlineFillPath {
+                Some(Cmd::OutlineFillPath {
                     fill_style: self.read_style(prim_style)?,
                     line_style: self.read_style(line_style_id)?,
                     line_width: self.read_unit()?,
                     path: self.read_path(segment_count)?,
-                }
+                })
             }
         };
 
@@ -835,31 +965,31 @@ pub fn parse<R: Read>(mut reader: R) -> Result<TinyVg, TinyVgError> {
 
     let color_count = reader.read_var_u32()?;
     let table = match encoding {
-        ColorEncoding::Rgba8888 => {
-            let values = iter::repeat_with(|| Rgba8888::read_from(&mut reader))
+        ColorEncodingTag::Rgba8888 => {
+            let values = iter::repeat_with(|| Rgba8888::read_table_entry(&mut reader))
                 .take(color_count as usize)
                 .collect::<Result<Vec<_>, _>>()?;
 
             ColorTable::Rgba8888(values)
         }
 
-        ColorEncoding::Rgb565 => {
-            let values = iter::repeat_with(|| Rgb565::read_from(&mut reader))
+        ColorEncodingTag::Rgb565 => {
+            let values = iter::repeat_with(|| Rgb565::read_table_entry(&mut reader))
                 .take(color_count as usize)
                 .collect::<Result<Vec<_>, _>>()?;
 
             ColorTable::Rgb565(values)
         }
 
-        ColorEncoding::RgbaF32 => {
-            let values = iter::repeat_with(|| RgbaF32::read_from(&mut reader))
+        ColorEncodingTag::RgbaF32 => {
+            let values = iter::repeat_with(|| RgbaF32::read_table_entry(&mut reader))
                 .take(color_count as usize)
                 .collect::<Result<Vec<_>, _>>()?;
 
             ColorTable::RgbaF32(values)
         }
 
-        ColorEncoding::Custom => return Err(TinyVgError::Unsupported),
+        ColorEncodingTag::Custom => return Err(TinyVgError::Unsupported),
     };
 
     let mut tvg_reader = TinyVgReader {
@@ -870,13 +1000,7 @@ pub fn parse<R: Read>(mut reader: R) -> Result<TinyVg, TinyVgError> {
     };
 
     let mut cmds = Vec::new();
-    loop {
-        let cmd = tvg_reader.read_cmd()?;
-
-        if cmd == Cmd::EndOfDocument {
-            break;
-        }
-
+    while let Some(cmd) = tvg_reader.read_cmd()? {
         cmds.push(cmd);
     }
 
@@ -885,6 +1009,483 @@ pub fn parse<R: Read>(mut reader: R) -> Result<TinyVg, TinyVgError> {
         table: tvg_reader.table,
         cmds,
     })
+}
+
+// TinyVG writing =================================================================================
+
+pub struct TinyVgWriter<W: Write> {
+    writer: W,
+}
+
+impl<W: Write> TinyVgWriter<W> {
+    pub fn new(writer: W) -> TinyVgWriter<W> {
+        TinyVgWriter { writer }
+    }
+
+    pub fn write_header(
+        mut self,
+        header: TinyVgHeader,
+    ) -> Result<ColorTableWriter<W>, TinyVgError> {
+        self.writer.write_all(&MAGIC)?;
+        self.writer.write_u8(VERSION)?;
+
+        let params = (header.range as u8) << 6 | (header.encoding as u8) << 4 | header.scale as u8;
+        self.writer.write_u8(params)?;
+
+        let write_unit_fn = header.range.write_fn();
+        write_unit_fn(
+            &mut self.writer,
+            header
+                .width
+                .try_into()
+                .map_err(|_| TinyVgError::OutOfRange)?,
+        )?;
+        write_unit_fn(
+            &mut self.writer,
+            header
+                .height
+                .try_into()
+                .map_err(|_| TinyVgError::OutOfRange)?,
+        )?;
+
+        Ok(ColorTableWriter {
+            header,
+            writer: self.writer,
+        })
+    }
+}
+
+pub struct ColorTableWriter<W: Write> {
+    header: TinyVgHeader,
+    writer: W,
+}
+
+impl<W: Write> ColorTableWriter<W> {
+    pub fn write_color_table<I, C>(mut self, colors: I) -> Result<CommandWriter<W>, TinyVgError>
+    where
+        I: ExactSizeIterator<Item = C>,
+        C: ColorEncoding,
+    {
+        if C::tag() != self.header.encoding {
+            return Err(TinyVgError::InvalidData);
+        }
+
+        let color_count: u32 = colors
+            .len()
+            .try_into()
+            .map_err(|_| TinyVgError::OutOfRange)?;
+
+        self.writer.write_var_u32(color_count)?;
+
+        let mut written: u32 = 0;
+        for color in colors {
+            color.write_table_entry(&mut self.writer)?;
+            written = written.checked_add(1).ok_or(TinyVgError::OutOfRange)?;
+
+            if written > color_count {
+                return Err(TinyVgError::InvalidData);
+            }
+        }
+
+        let write_unit_fn = self.header.range.write_fn();
+
+        Ok(CommandWriter {
+            header: self.header,
+            color_count,
+            write_unit_fn,
+            writer: self.writer,
+        })
+    }
+}
+
+pub struct CommandWriter<W: Write> {
+    header: TinyVgHeader,
+    color_count: u32,
+    write_unit_fn: fn(&mut W, i32) -> Result<(), TinyVgError>,
+    writer: W,
+}
+
+impl<W: Write> CommandWriter<W> {
+    fn write_unit(&mut self, unit: f32) -> Result<(), TinyVgError> {
+        let unscaled = unit * (1 << self.header.scale) as f32;
+
+        // TODO: Casting to i32 will clamp values to [i32::MIN, i32::MAX].
+        // It's probably preferable to range check the unscaled value directly
+        // with the supported coordinate range and potentially error out.
+        (self.write_unit_fn)(&mut self.writer, unscaled as i32)?;
+
+        Ok(())
+    }
+
+    fn write_count(&mut self, count: usize) -> Result<(), TinyVgError> {
+        let as_u32: u32 = count.try_into().map_err(|_| TinyVgError::OutOfRange)?;
+        self.writer
+            .write_var_u32(as_u32.checked_sub(1).ok_or(TinyVgError::InvalidData)?)?;
+
+        Ok(())
+    }
+
+    const U6_MAX: u8 = (1 << 6) - 1;
+    fn write_styled_count(&mut self, count: usize, style_id: StyleId) -> Result<(), TinyVgError> {
+        if count - 1 > Self::U6_MAX as usize {
+            return Err(TinyVgError::OutOfRange);
+        }
+
+        self.writer
+            .write_u8((style_id as u8) << 6 | (count as u8 - 1))?;
+
+        Ok(())
+    }
+
+    fn write_point(&mut self, point: Point) -> Result<(), TinyVgError> {
+        self.write_unit(point.x)?;
+        self.write_unit(point.y)?;
+
+        Ok(())
+    }
+
+    fn write_points<P>(&mut self, points: P) -> Result<(), TinyVgError>
+    where
+        P: ExactSizeIterator<Item = Point>,
+    {
+        for point in points {
+            self.write_point(point)?;
+        }
+
+        Ok(())
+    }
+
+    fn write_line(&mut self, line: Line) -> Result<(), TinyVgError> {
+        self.write_point(line.start)?;
+        self.write_point(line.end)?;
+
+        Ok(())
+    }
+
+    fn write_lines<L>(&mut self, lines: L) -> Result<(), TinyVgError>
+    where
+        L: ExactSizeIterator<Item = Line>,
+    {
+        for line in lines {
+            self.write_line(line)?;
+        }
+
+        Ok(())
+    }
+
+    fn write_rect(&mut self, rect: Rect) -> Result<(), TinyVgError> {
+        self.write_unit(rect.x)?;
+        self.write_unit(rect.y)?;
+        self.write_unit(rect.width)?;
+        self.write_unit(rect.height)?;
+
+        Ok(())
+    }
+
+    fn write_rects<R>(&mut self, rects: R) -> Result<(), TinyVgError>
+    where
+        R: ExactSizeIterator<Item = Rect>,
+    {
+        for rect in rects {
+            self.write_rect(rect)?;
+        }
+
+        Ok(())
+    }
+
+    fn write_style(&mut self, style: Style) -> Result<(), TinyVgError> {
+        match style {
+            Style::FlatColor { color } => {
+                if color >= self.color_count {
+                    return Err(TinyVgError::NoSuchColor);
+                }
+
+                self.writer.write_var_u32(color)?;
+            }
+            Style::LinearGradient {
+                start,
+                end,
+                start_color,
+                end_color,
+            }
+            | Style::RadialGradient {
+                start,
+                end,
+                start_color,
+                end_color,
+            } => {
+                if start_color >= self.color_count || end_color >= self.color_count {
+                    return Err(TinyVgError::NoSuchColor);
+                }
+
+                self.write_point(start)?;
+                self.write_point(end)?;
+                self.writer.write_var_u32(start_color)?;
+                self.writer.write_var_u32(end_color)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn write_path_instr(&mut self, instr: PathInstr) -> Result<(), TinyVgError> {
+        let (has_width, width) = match instr.line_width {
+            Some(w) => (true, w),
+            None => (false, 0.0),
+        };
+
+        match instr.kind {
+            PathInstrKind::Line { to } => {
+                self.writer
+                    .write_u8(PathInstrId::Line.with_line_width(has_width))?;
+                if has_width {
+                    self.write_unit(width)?;
+                }
+                self.write_point(to)?;
+            }
+
+            PathInstrKind::HorizontalLine { to_x } => {
+                self.writer
+                    .write_u8(PathInstrId::HorizontalLine.with_line_width(has_width))?;
+                if has_width {
+                    self.write_unit(width)?;
+                }
+                self.write_unit(to_x)?;
+            }
+
+            PathInstrKind::VerticalLine { to_y } => {
+                self.writer
+                    .write_u8(PathInstrId::VerticalLine.with_line_width(has_width))?;
+                if has_width {
+                    self.write_unit(width)?;
+                }
+                self.write_unit(to_y)?;
+            }
+
+            PathInstrKind::CubicBezier {
+                control_0,
+                control_1,
+                to,
+            } => {
+                self.writer
+                    .write_u8(PathInstrId::CubicBezier.with_line_width(has_width))?;
+                if has_width {
+                    self.write_unit(width)?;
+                }
+                self.write_point(control_0)?;
+                self.write_point(control_1)?;
+                self.write_point(to)?;
+            }
+
+            PathInstrKind::ArcCircle {
+                large_arc,
+                sweep,
+                radius,
+                to,
+            } => {
+                self.writer
+                    .write_u8(PathInstrId::ArcCircle.with_line_width(has_width))?;
+                if has_width {
+                    self.write_unit(width)?;
+                }
+                let flags = (sweep as u8) << 1 | large_arc as u8;
+                self.writer.write_u8(flags)?;
+                self.write_unit(radius)?;
+                self.write_point(to)?;
+            }
+
+            PathInstrKind::ArcEllipse {
+                large_arc,
+                sweep,
+                radius_x,
+                radius_y,
+                rotation_deg,
+                to,
+            } => {
+                self.writer
+                    .write_u8(PathInstrId::ArcEllipse.with_line_width(has_width))?;
+                if has_width {
+                    self.write_unit(width)?;
+                }
+                let flags = (sweep as u8) << 1 | large_arc as u8;
+                self.writer.write_u8(flags)?;
+                self.write_unit(radius_x)?;
+                self.write_unit(radius_y)?;
+                self.write_unit(rotation_deg)?;
+                self.write_point(to)?;
+            }
+
+            PathInstrKind::Close => {
+                self.writer
+                    .write_u8(PathInstrId::Close.with_line_width(has_width))?;
+                if has_width {
+                    self.write_unit(width)?;
+                }
+            }
+
+            PathInstrKind::QuadraticBezier { control, to } => {
+                self.writer
+                    .write_u8(PathInstrId::QuadraticBezier.with_line_width(has_width))?;
+                if has_width {
+                    self.write_unit(width)?;
+                }
+                self.write_point(control)?;
+                self.write_point(to)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn write_segment(&mut self, segment: Segment) -> Result<(), TinyVgError> {
+        self.write_count(segment.instrs.len())?;
+        self.write_point(segment.start)?;
+        for instr in segment.instrs {
+            self.write_path_instr(instr)?;
+        }
+
+        Ok(())
+    }
+
+    fn write_path(&mut self, path: Path) -> Result<(), TinyVgError> {
+        for segment in path.segments {
+            self.write_segment(segment)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn write_command(&mut self, command: Cmd) -> Result<(), TinyVgError> {
+        match command {
+            Cmd::FillPoly { fill_style, points } => {
+                self.writer
+                    .write_u8(CmdId::FillPoly.with_style_id(fill_style.id()))?;
+                self.write_count(points.len())?;
+                self.write_style(fill_style)?;
+                self.write_points(points.into_iter())?;
+            }
+
+            Cmd::FillRects { fill_style, rects } => {
+                self.writer
+                    .write_u8(CmdId::FillRects.with_style_id(fill_style.id()))?;
+                self.write_count(rects.len())?;
+                self.write_style(fill_style)?;
+                self.write_rects(rects.into_iter())?;
+            }
+
+            Cmd::FillPath { fill_style, path } => {
+                self.writer
+                    .write_u8(CmdId::FillPath.with_style_id(fill_style.id()))?;
+                self.write_count(path.segments.len())?;
+                self.write_style(fill_style)?;
+                self.write_path(path)?;
+            }
+
+            Cmd::DrawLines {
+                line_style,
+                width,
+                lines,
+            } => {
+                self.writer
+                    .write_u8(CmdId::DrawLines.with_style_id(line_style.id()))?;
+                self.write_count(lines.len())?;
+                self.write_style(line_style)?;
+                self.write_unit(width)?;
+                self.write_lines(lines.into_iter())?;
+            }
+
+            Cmd::DrawLoop {
+                line_style,
+                width,
+                points,
+            } => {
+                self.writer
+                    .write_u8(CmdId::DrawLoop.with_style_id(line_style.id()))?;
+                self.write_count(points.len())?;
+                self.write_style(line_style)?;
+                self.write_unit(width)?;
+                self.write_points(points.into_iter())?;
+            }
+
+            Cmd::DrawStrip {
+                line_style,
+                width,
+                points,
+            } => {
+                self.writer
+                    .write_u8(CmdId::DrawStrip.with_style_id(line_style.id()))?;
+                self.write_count(points.len())?;
+                self.write_style(line_style)?;
+                self.write_unit(width)?;
+                self.write_points(points.into_iter())?;
+            }
+
+            Cmd::DrawPath {
+                line_style,
+                width,
+                path,
+            } => {
+                self.writer
+                    .write_u8(CmdId::DrawPath.with_style_id(line_style.id()))?;
+                self.write_count(path.segments.len())?;
+                self.write_style(line_style)?;
+                self.write_unit(width)?;
+                self.write_path(path)?;
+            }
+
+            Cmd::OutlineFillPoly {
+                fill_style,
+                line_style,
+                line_width,
+                points,
+            } => {
+                self.writer
+                    .write_u8(CmdId::OutlineFillPoly.with_style_id(fill_style.id()))?;
+                self.write_styled_count(points.len(), line_style.id())?;
+                self.write_style(fill_style)?;
+                self.write_style(line_style)?;
+                self.write_unit(line_width)?;
+                self.write_points(points.into_iter())?;
+            }
+
+            Cmd::OutlineFillRects {
+                fill_style,
+                line_style,
+                line_width,
+                rects,
+            } => {
+                self.writer
+                    .write_u8(CmdId::OutlineFillRects.with_style_id(fill_style.id()))?;
+                self.write_styled_count(rects.len(), line_style.id())?;
+                self.write_style(fill_style)?;
+                self.write_style(line_style)?;
+                self.write_unit(line_width)?;
+                self.write_rects(rects.into_iter())?;
+            }
+
+            Cmd::OutlineFillPath {
+                fill_style,
+                line_style,
+                line_width,
+                path,
+            } => {
+                self.writer
+                    .write_u8(CmdId::OutlineFillPath.with_style_id(fill_style.id()))?;
+                self.write_styled_count(path.segments.len(), line_style.id())?;
+                self.write_style(fill_style)?;
+                self.write_style(line_style)?;
+                self.write_unit(line_width)?;
+                self.write_path(path)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<W, TinyVgError> {
+        self.writer.write_u8(0)?;
+        Ok(self.writer)
+    }
 }
 
 /// A convenience trait for extracting bitfields.

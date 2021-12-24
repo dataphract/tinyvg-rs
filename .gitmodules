@@ -1,0 +1,3 @@
+[submodule "example-files"]
+	path = example-files
+	url = https://github.com/TinyVG/examples
