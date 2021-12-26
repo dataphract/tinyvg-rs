@@ -352,10 +352,14 @@ impl<'a, R: Read, C: ColorEncoding> ExactSizeIterator for ColorTableEntries<'a, 
 
 // Coordinates ====================================================================================
 
+/// Indicates the possible range of coordinates in the image.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum CoordinateRange {
+    /// Coordinates are signed 16-bit integers, with a range of [-32768, 32767].
     Default = 0,
+    /// Coordinates are signed 8-bit integers, with a range of [-128, 127].
     Reduced = 1,
+    /// Coordinates are signed 32-bit integers, with a range of [-2147483648, 2147483647].
     Enhanced = 2,
 }
 
@@ -434,7 +438,7 @@ impl TryFrom<u8> for CoordinateRange {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum StyleId {
+enum StyleId {
     FlatColor = 0,
     LinearGradient = 1,
     RadialGradient = 2,
@@ -453,6 +457,7 @@ impl TryFrom<u8> for StyleId {
     }
 }
 
+/// The style of an element.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Style {
     FlatColor {
@@ -517,7 +522,7 @@ impl TryFrom<u8> for ArcSweep {
 // Paths ==========================================================================================
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum PathInstrId {
+enum PathInstrId {
     Line = 0,
     HorizontalLine = 1,
     VerticalLine = 2,
@@ -573,29 +578,29 @@ pub enum PathInstrKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PathInstr {
-    kind: PathInstrKind,
-    line_width: Option<f32>,
+    pub kind: PathInstrKind,
+    pub line_width: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Segment {
-    start: Point,
-    instrs: Vec<PathInstr>,
+    pub start: Point,
+    pub instrs: Vec<PathInstr>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Path {
-    segments: Vec<Segment>,
+    pub segments: Vec<Segment>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Line {
-    start: Point,
-    end: Point,
+    pub start: Point,
+    pub end: Point,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum CmdId {
+enum CmdId {
     EndOfDocument = 0,
     FillPoly = 1,
     FillRects = 2,
@@ -696,12 +701,12 @@ pub enum Cmd {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TinyVgHeader {
-    scale: u8,
-    encoding: ColorEncodingTag,
-    range: CoordinateRange,
-    width: u32,
-    height: u32,
-    color_count: u32,
+    pub scale: u8,
+    pub encoding: ColorEncodingTag,
+    pub range: CoordinateRange,
+    pub width: u32,
+    pub height: u32,
+    pub color_count: u32,
 }
 
 // TinyVG reading =================================================================================
