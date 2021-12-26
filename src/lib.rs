@@ -1,6 +1,9 @@
+//! A library for reading and writing the TinyVG vector graphics format.
+
 use std::{
     io::{self, Read, Write},
     iter,
+    marker::PhantomData,
     ops::{BitAnd, Shl, Shr, Sub},
 };
 
@@ -16,6 +19,8 @@ pub enum TinyVgError {
     OutOfRange,
     Unsupported,
     NoSuchColor,
+    BadPosition,
+    Fatal,
 }
 
 impl From<io::Error> for TinyVgError {
@@ -174,8 +179,9 @@ impl TryFrom<u8> for ColorEncodingTag {
 }
 
 pub trait ColorEncoding: Sized {
+    // TODO: end users should not be able to implement this method.
     fn tag() -> ColorEncodingTag;
-    fn read_table_entry<R: Read>(reader: R) -> io::Result<Self>;
+    fn read_table_entry<R: Read>(reader: R) -> Result<Self, TinyVgError>;
     fn write_table_entry<W: Write>(&self, writer: W) -> Result<(), TinyVgError>;
 }
 
@@ -184,7 +190,7 @@ impl ColorEncoding for Rgba8888 {
         ColorEncodingTag::Rgba8888
     }
 
-    fn read_table_entry<R: Read>(mut reader: R) -> io::Result<Self> {
+    fn read_table_entry<R: Read>(mut reader: R) -> Result<Rgba8888, TinyVgError> {
         let red = reader.read_u8()?;
         let green = reader.read_u8()?;
         let blue = reader.read_u8()?;
@@ -213,7 +219,7 @@ impl ColorEncoding for Rgb565 {
         ColorEncodingTag::Rgb565
     }
 
-    fn read_table_entry<R: Read>(mut reader: R) -> io::Result<Self> {
+    fn read_table_entry<R: Read>(mut reader: R) -> Result<Rgb565, TinyVgError> {
         let mut bytes = [0u8; 2];
         reader.read_exact(&mut bytes)?;
 
@@ -232,7 +238,7 @@ impl ColorEncoding for RgbaF32 {
         ColorEncodingTag::RgbaF32
     }
 
-    fn read_table_entry<R: Read>(mut reader: R) -> io::Result<Self> {
+    fn read_table_entry<R: Read>(mut reader: R) -> Result<RgbaF32, TinyVgError> {
         let red = reader.read_f32::<LE>()?;
         let green = reader.read_f32::<LE>()?;
         let blue = reader.read_f32::<LE>()?;
@@ -257,11 +263,59 @@ impl ColorEncoding for RgbaF32 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum ColorTable {
-    Rgba8888(Vec<Rgba8888>),
-    Rgb565(Vec<Rgb565>),
-    RgbaF32(Vec<RgbaF32>),
+impl ColorEncoding for () {
+    fn tag() -> ColorEncodingTag {
+        ColorEncodingTag::Custom
+    }
+
+    fn read_table_entry<R: Read>(_reader: R) -> Result<(), TinyVgError> {
+        Ok(())
+    }
+
+    fn write_table_entry<W: Write>(&self, _writer: W) -> Result<(), TinyVgError> {
+        Ok(())
+    }
+}
+
+pub enum ColorTableEncoding<'a, R: Read, C: ColorEncoding = ()> {
+    Rgba8888(ColorTableEntries<'a, R, Rgba8888>),
+    Rgb565(ColorTableEntries<'a, R, Rgb565>),
+    RgbaF32(ColorTableEntries<'a, R, RgbaF32>),
+    Custom(ColorTableEntries<'a, R, C>),
+}
+
+pub struct ColorTableEntries<'a, R: Read, C: ColorEncoding> {
+    header: TinyVgHeader,
+    tvg: &'a mut TinyVgReader<R>,
+    phantom: PhantomData<C>,
+}
+
+impl<'a, R: Read, C: ColorEncoding> ColorTableEntries<'a, R, C> {
+    fn new(tvg: &'a mut TinyVgReader<R>) -> Self {
+        ColorTableEntries {
+            header: *tvg.header.as_ref().unwrap(),
+            tvg,
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<'a, R: Read, C: ColorEncoding> Iterator for ColorTableEntries<'a, R, C> {
+    type Item = Result<C, TinyVgError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        (self.tvg.colors_read < self.header.color_count).then(|| {
+            let entry = C::read_table_entry(&mut self.tvg.reader)?;
+            self.tvg.colors_read += 1;
+            Ok(entry)
+        })
+    }
+}
+
+impl<'a, R: Read, C: ColorEncoding> ExactSizeIterator for ColorTableEntries<'a, R, C> {
+    fn len(&self) -> usize {
+        (self.header.color_count - self.tvg.colors_read) as usize
+    }
 }
 
 // Coordinates ====================================================================================
@@ -615,56 +669,34 @@ pub struct TinyVgHeader {
     range: CoordinateRange,
     width: u32,
     height: u32,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TinyVg {
-    header: TinyVgHeader,
-    table: ColorTable,
-    cmds: Vec<Cmd>,
-}
-
-impl TinyVg {
-    pub fn header(&self) -> &TinyVgHeader {
-        &self.header
-    }
-
-    pub fn color_table(&self) -> &ColorTable {
-        &self.table
-    }
-
-    pub fn cmds(&self) -> &Vec<Cmd> {
-        &self.cmds
-    }
+    color_count: u32,
 }
 
 // TinyVG reading =================================================================================
 
-/// A TinyVG data stream reader.
-struct TinyVgReader<R: Read> {
+pub struct CommandReader<'a, R: Read> {
     header: TinyVgHeader,
     read_unit_fn: fn(&mut R) -> io::Result<i32>,
-    table: ColorTable,
-    reader: R,
+    tvg: &'a mut TinyVgReader<R>,
 }
 
-impl<R: Read> TinyVgReader<R> {
+impl<'a, R: Read> CommandReader<'a, R> {
     fn read_style(&mut self, id: StyleId) -> Result<Style, TinyVgError> {
         let style = match id {
             StyleId::FlatColor => Style::FlatColor {
-                color: self.reader.read_var_u32()?,
+                color: self.tvg.reader.read_var_u32()?,
             },
             StyleId::LinearGradient => Style::LinearGradient {
                 start: self.read_point()?,
                 end: self.read_point()?,
-                start_color: self.reader.read_var_u32()?,
-                end_color: self.reader.read_var_u32()?,
+                start_color: self.tvg.reader.read_var_u32()?,
+                end_color: self.tvg.reader.read_var_u32()?,
             },
             StyleId::RadialGradient => Style::RadialGradient {
                 start: self.read_point()?,
                 end: self.read_point()?,
-                start_color: self.reader.read_var_u32()?,
-                end_color: self.reader.read_var_u32()?,
+                start_color: self.tvg.reader.read_var_u32()?,
+                end_color: self.tvg.reader.read_var_u32()?,
             },
         };
 
@@ -672,7 +704,7 @@ impl<R: Read> TinyVgReader<R> {
     }
 
     fn read_unit(&mut self) -> io::Result<f32> {
-        let num = (self.read_unit_fn)(&mut self.reader)?;
+        let num = (self.read_unit_fn)(&mut self.tvg.reader)?;
         Ok(num as f32 / (1 << self.header.scale) as f32)
     }
 
@@ -723,7 +755,7 @@ impl<R: Read> TinyVgReader<R> {
     }
 
     fn read_path_instr(&mut self) -> Result<PathInstr, TinyVgError> {
-        let tag = self.reader.read_u8()?;
+        let tag = self.tvg.reader.read_u8()?;
 
         let instr = tag.bits(0, 3);
         let has_line_width = tag.bits(4, 1) == 1;
@@ -746,7 +778,7 @@ impl<R: Read> TinyVgReader<R> {
                 to: self.read_point()?,
             },
             4 => {
-                let flags = self.reader.read_u8()?;
+                let flags = self.tvg.reader.read_u8()?;
                 let large_arc = flags.bits(0, 1) == 1;
                 let sweep = ArcSweep::try_from(flags.bits(1, 1))?;
                 let radius = self.read_unit()?;
@@ -760,7 +792,7 @@ impl<R: Read> TinyVgReader<R> {
                 }
             }
             5 => {
-                let flags = self.reader.read_u8()?;
+                let flags = self.tvg.reader.read_u8()?;
                 let large_arc = flags.bits(0, 1) == 1;
                 let sweep = ArcSweep::try_from(flags.bits(1, 1))?;
                 let radius_x = self.read_unit()?;
@@ -789,7 +821,7 @@ impl<R: Read> TinyVgReader<R> {
     }
 
     fn read_segment(&mut self) -> Result<Segment, TinyVgError> {
-        let instr_count = self.reader.read_var_u32()? + 1;
+        let instr_count = self.tvg.reader.read_var_u32()? + 1;
         let start = self.read_point()?;
         let instrs = iter::repeat_with(|| self.read_path_instr())
             .take(instr_count as usize)
@@ -806,16 +838,23 @@ impl<R: Read> TinyVgReader<R> {
         Ok(Path { segments })
     }
 
-    fn read_cmd(&mut self) -> Result<Option<Cmd>, TinyVgError> {
-        let tag = self.reader.read_u8()?;
+    pub fn read_cmd(&mut self) -> Result<Option<Cmd>, TinyVgError> {
+        if self.tvg.commands_finished {
+            return Ok(None);
+        }
+
+        let tag = self.tvg.reader.read_u8()?;
         let id = CmdId::try_from(tag.bits(0, 6))?;
         let prim_style = StyleId::try_from(tag.bits(6, 2))?;
 
         let cmd = match id {
-            CmdId::EndOfDocument => None,
+            CmdId::EndOfDocument => {
+                self.tvg.commands_finished = true;
+                None
+            }
 
             CmdId::FillPoly => {
-                let point_count = self.reader.read_var_u32()? + 1;
+                let point_count = self.tvg.reader.read_var_u32()? + 1;
                 Some(Cmd::FillPoly {
                     fill_style: self.read_style(prim_style)?,
                     points: self.read_points(point_count)?,
@@ -823,7 +862,7 @@ impl<R: Read> TinyVgReader<R> {
             }
 
             CmdId::FillRects => {
-                let rect_count = self.reader.read_var_u32()? + 1;
+                let rect_count = self.tvg.reader.read_var_u32()? + 1;
 
                 Some(Cmd::FillRects {
                     fill_style: self.read_style(prim_style)?,
@@ -832,7 +871,7 @@ impl<R: Read> TinyVgReader<R> {
             }
 
             CmdId::FillPath => {
-                let segment_count = self.reader.read_var_u32()? + 1;
+                let segment_count = self.tvg.reader.read_var_u32()? + 1;
 
                 Some(Cmd::FillPath {
                     fill_style: self.read_style(prim_style)?,
@@ -841,7 +880,7 @@ impl<R: Read> TinyVgReader<R> {
             }
 
             CmdId::DrawLines => {
-                let line_count = self.reader.read_var_u32()? + 1;
+                let line_count = self.tvg.reader.read_var_u32()? + 1;
 
                 Some(Cmd::DrawLines {
                     line_style: self.read_style(prim_style)?,
@@ -851,7 +890,7 @@ impl<R: Read> TinyVgReader<R> {
             }
 
             CmdId::DrawLoop => {
-                let point_count = self.reader.read_var_u32()? + 1;
+                let point_count = self.tvg.reader.read_var_u32()? + 1;
                 Some(Cmd::DrawLoop {
                     line_style: self.read_style(prim_style)?,
                     width: self.read_unit()?,
@@ -860,7 +899,7 @@ impl<R: Read> TinyVgReader<R> {
             }
 
             CmdId::DrawStrip => {
-                let point_count = self.reader.read_var_u32()? + 1;
+                let point_count = self.tvg.reader.read_var_u32()? + 1;
 
                 Some(Cmd::DrawStrip {
                     line_style: self.read_style(prim_style)?,
@@ -870,7 +909,7 @@ impl<R: Read> TinyVgReader<R> {
             }
 
             CmdId::DrawPath => {
-                let segment_count = self.reader.read_var_u32()? + 1;
+                let segment_count = self.tvg.reader.read_var_u32()? + 1;
 
                 Some(Cmd::DrawPath {
                     line_style: self.read_style(prim_style)?,
@@ -880,7 +919,7 @@ impl<R: Read> TinyVgReader<R> {
             }
 
             CmdId::OutlineFillPoly => {
-                let head = self.reader.read_u8()?;
+                let head = self.tvg.reader.read_u8()?;
                 let point_count: u32 = (head.bits(0, 6) + 1).into();
                 let line_style_id = StyleId::try_from(head.bits(6, 2))?;
 
@@ -893,7 +932,7 @@ impl<R: Read> TinyVgReader<R> {
             }
 
             CmdId::OutlineFillRects => {
-                let head = self.reader.read_u8()?;
+                let head = self.tvg.reader.read_u8()?;
                 let rect_count: u32 = (head.bits(0, 6) + 1).into();
                 let line_style_id = StyleId::try_from(head.bits(6, 2))?;
 
@@ -906,7 +945,7 @@ impl<R: Read> TinyVgReader<R> {
             }
 
             CmdId::OutlineFillPath => {
-                let head = self.reader.read_u8()?;
+                let head = self.tvg.reader.read_u8()?;
                 let segment_count: u32 = (head.bits(0, 6) + 1).into();
                 let line_style_id = StyleId::try_from(head.bits(6, 2))?;
 
@@ -923,7 +962,90 @@ impl<R: Read> TinyVgReader<R> {
     }
 }
 
-pub fn parse<R: Read>(mut reader: R) -> Result<TinyVg, TinyVgError> {
+/// A TinyVG data stream reader.
+pub struct TinyVgReader<R: Read> {
+    header: Option<TinyVgHeader>,
+    colors_read: u32,
+    commands_finished: bool,
+    reader: R,
+}
+
+impl<R: Read> TinyVgReader<R> {
+    pub fn new(reader: R) -> TinyVgReader<R> {
+        TinyVgReader {
+            header: None,
+            colors_read: 0,
+            commands_finished: false,
+            reader,
+        }
+    }
+
+    pub fn read_header(&mut self) -> Result<TinyVgHeader, TinyVgError> {
+        match self.header {
+            Some(_) => Err(TinyVgError::BadPosition),
+            None => {
+                let header = read_header(&mut self.reader)?;
+                self.header = Some(header);
+                Ok(header)
+            }
+        }
+    }
+
+    pub fn read_color_table(&mut self) -> Result<ColorTableEncoding<R, ()>, TinyVgError> {
+        self.read_custom_color_table::<()>()
+    }
+
+    pub fn read_custom_color_table<C: ColorEncoding>(
+        &mut self,
+    ) -> Result<ColorTableEncoding<R, C>, TinyVgError> {
+        let header = match self.header {
+            Some(header) => header,
+            None => return Err(TinyVgError::BadPosition),
+        };
+
+        if self.colors_read >= header.color_count {
+            return Err(TinyVgError::BadPosition);
+        }
+
+        let enc = match header.encoding {
+            ColorEncodingTag::Rgba8888 => {
+                ColorTableEncoding::Rgba8888(ColorTableEntries::new(self))
+            }
+            ColorEncodingTag::Rgb565 => ColorTableEncoding::Rgb565(ColorTableEntries::new(self)),
+            ColorEncodingTag::RgbaF32 => ColorTableEncoding::RgbaF32(ColorTableEntries::new(self)),
+            ColorEncodingTag::Custom => ColorTableEncoding::Custom(ColorTableEntries::new(self)),
+        };
+
+        Ok(enc)
+    }
+
+    pub fn read_commands(&mut self) -> Result<CommandReader<R>, TinyVgError> {
+        let header = match self.header {
+            Some(header) => header,
+            None => return Err(TinyVgError::BadPosition),
+        };
+
+        if self.colors_read < header.color_count {
+            return Err(TinyVgError::BadPosition);
+        }
+
+        Ok(CommandReader {
+            header,
+            read_unit_fn: header.range.read_fn(),
+            tvg: self,
+        })
+    }
+
+    pub fn finish(self) -> Result<R, Self> {
+        if self.commands_finished {
+            Ok(self.reader)
+        } else {
+            Err(self)
+        }
+    }
+}
+
+fn read_header<R: Read>(mut reader: R) -> Result<TinyVgHeader, TinyVgError> {
     let magic = {
         let mut m = [0u8; 2];
         reader.read_exact(&mut m)?;
@@ -948,66 +1070,22 @@ pub fn parse<R: Read>(mut reader: R) -> Result<TinyVg, TinyVgError> {
     // Select the appropriate read function for the coordinate range.
     let read_unit_fn = range.read_fn::<R>();
 
-    let width: u32 = read_unit_fn(&mut reader)?
+    let width = read_unit_fn(&mut reader)?
         .try_into()
         .map_err(|_| TinyVgError::InvalidData)?;
     let height = read_unit_fn(&mut reader)?
         .try_into()
         .map_err(|_| TinyVgError::InvalidData)?;
 
-    let header = TinyVgHeader {
+    let color_count = reader.read_var_u32()?;
+
+    Ok(TinyVgHeader {
         scale,
         encoding,
         range,
         width,
         height,
-    };
-
-    let color_count = reader.read_var_u32()?;
-    let table = match encoding {
-        ColorEncodingTag::Rgba8888 => {
-            let values = iter::repeat_with(|| Rgba8888::read_table_entry(&mut reader))
-                .take(color_count as usize)
-                .collect::<Result<Vec<_>, _>>()?;
-
-            ColorTable::Rgba8888(values)
-        }
-
-        ColorEncodingTag::Rgb565 => {
-            let values = iter::repeat_with(|| Rgb565::read_table_entry(&mut reader))
-                .take(color_count as usize)
-                .collect::<Result<Vec<_>, _>>()?;
-
-            ColorTable::Rgb565(values)
-        }
-
-        ColorEncodingTag::RgbaF32 => {
-            let values = iter::repeat_with(|| RgbaF32::read_table_entry(&mut reader))
-                .take(color_count as usize)
-                .collect::<Result<Vec<_>, _>>()?;
-
-            ColorTable::RgbaF32(values)
-        }
-
-        ColorEncodingTag::Custom => return Err(TinyVgError::Unsupported),
-    };
-
-    let mut tvg_reader = TinyVgReader {
-        header,
-        table,
-        read_unit_fn,
-        reader,
-    };
-
-    let mut cmds = Vec::new();
-    while let Some(cmd) = tvg_reader.read_cmd()? {
-        cmds.push(cmd);
-    }
-
-    Ok(TinyVg {
-        header: tvg_reader.header,
-        table: tvg_reader.table,
-        cmds,
+        color_count,
     })
 }
 
