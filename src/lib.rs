@@ -7,7 +7,7 @@
 //! ```no_run
 //! use std::fs::File;
 //!
-//! use tinyvg::{ColorTableEncoding, TinyVgReader};
+//! use tinyvg::{Cmd, ColorTableEncoding, TinyVgReader};
 //! # use tinyvg::TinyVgError;
 //!
 //! # pub fn f() -> tinyvg::Result<()> {
@@ -21,10 +21,10 @@
 //!     _ => panic!("expected RGBA8888 color encoding"),
 //! };
 //!
-//! let mut commands = Vec::new();
+//! let mut commands: Vec<Cmd> = Vec::new();
 //! let mut cr = r.read_commands()?;
 //! while let Some(cmd) = cr.read_cmd()? {
-//!     commands.push(cmd);
+//!     commands.push(cmd.try_into()?);
 //! }
 //!
 //! println!("Number of commands: {}", commands.len());
@@ -789,6 +789,163 @@ impl TryFrom<u8> for CmdId {
     }
 }
 
+pub enum CmdReader<'a, 'b, R: Read> {
+    FillPoly {
+        fill_style: Style,
+        points: Points<'a, 'b, R>,
+    },
+    FillRects {
+        fill_style: Style,
+        rects: Rects<'a, 'b, R>,
+    },
+    FillPath {
+        fill_style: Style,
+        segments: Segments<'a, 'b, R>,
+    },
+    DrawLines {
+        line_style: Style,
+        width: f32,
+        lines: Lines<'a, 'b, R>,
+    },
+    DrawLoop {
+        line_style: Style,
+        width: f32,
+        points: Points<'a, 'b, R>,
+    },
+    DrawStrip {
+        line_style: Style,
+        width: f32,
+        points: Points<'a, 'b, R>,
+    },
+    DrawPath {
+        line_style: Style,
+        width: f32,
+        segments: Segments<'a, 'b, R>,
+    },
+    OutlineFillPoly {
+        fill_style: Style,
+        line_style: Style,
+        line_width: f32,
+        points: Points<'a, 'b, R>,
+    },
+    OutlineFillRects {
+        fill_style: Style,
+        line_style: Style,
+        line_width: f32,
+        rects: Rects<'a, 'b, R>,
+    },
+    OutlineFillPath {
+        fill_style: Style,
+        line_style: Style,
+        line_width: f32,
+        segments: Segments<'a, 'b, R>,
+    },
+}
+
+impl<'a, 'b, R: Read> TryInto<Cmd> for CmdReader<'a, 'b, R> {
+    type Error = TinyVgError;
+
+    fn try_into(self) -> Result<Cmd> {
+        let cmd = match self {
+            CmdReader::FillPoly { fill_style, points } => Cmd::FillPoly {
+                fill_style,
+                points: points.collect::<Result<_>>()?,
+            },
+
+            CmdReader::FillRects { fill_style, rects } => Cmd::FillRects {
+                fill_style,
+                rects: rects.collect::<Result<_>>()?,
+            },
+
+            CmdReader::FillPath {
+                fill_style,
+                segments,
+            } => Cmd::FillPath {
+                fill_style,
+                segments: segments.collect::<Result<_>>()?,
+            },
+
+            CmdReader::DrawLines {
+                line_style,
+                width,
+                lines,
+            } => Cmd::DrawLines {
+                line_style,
+                width,
+                lines: lines.collect::<Result<_>>()?,
+            },
+
+            CmdReader::DrawLoop {
+                line_style,
+                width,
+                points,
+            } => Cmd::DrawLoop {
+                line_style,
+                width,
+                points: points.collect::<Result<_>>()?,
+            },
+
+            CmdReader::DrawStrip {
+                line_style,
+                width,
+                points,
+            } => Cmd::DrawStrip {
+                line_style,
+                width,
+                points: points.collect::<Result<_>>()?,
+            },
+
+            CmdReader::DrawPath {
+                line_style,
+                width,
+                segments,
+            } => Cmd::DrawPath {
+                line_style,
+                width,
+                segments: segments.collect::<Result<_>>()?,
+            },
+
+            CmdReader::OutlineFillPoly {
+                fill_style,
+                line_style,
+                line_width,
+                points,
+            } => Cmd::OutlineFillPoly {
+                fill_style,
+                line_style,
+                line_width,
+                points: points.collect::<Result<_>>()?,
+            },
+
+            CmdReader::OutlineFillRects {
+                fill_style,
+                line_style,
+                line_width,
+                rects,
+            } => Cmd::OutlineFillRects {
+                fill_style,
+                line_style,
+                line_width,
+                rects: rects.collect::<Result<_>>()?,
+            },
+
+            CmdReader::OutlineFillPath {
+                fill_style,
+                line_style,
+                line_width,
+                segments,
+            } => Cmd::OutlineFillPath {
+                fill_style,
+                line_style,
+                line_width,
+                segments: segments.collect::<Result<_>>()?,
+            },
+        };
+
+        Ok(cmd)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cmd {
     FillPoly {
@@ -801,7 +958,7 @@ pub enum Cmd {
     },
     FillPath {
         fill_style: Style,
-        path: Path,
+        segments: Vec<Segment>,
     },
     DrawLines {
         line_style: Style,
@@ -821,7 +978,7 @@ pub enum Cmd {
     DrawPath {
         line_style: Style,
         width: f32,
-        path: Path,
+        segments: Vec<Segment>,
     },
     OutlineFillPoly {
         fill_style: Style,
@@ -839,7 +996,7 @@ pub enum Cmd {
         fill_style: Style,
         line_style: Style,
         line_width: f32,
-        path: Path,
+        segments: Vec<Segment>,
     },
 }
 
@@ -899,12 +1056,11 @@ impl<'a, R: Read> CommandReader<'a, R> {
         Ok(Point { x, y })
     }
 
-    fn read_points(&mut self, point_count: u32) -> Result<Vec<Point>> {
+    fn read_points<'b>(&'b mut self, point_count: u32) -> Points<'b, 'a, R> {
         Points {
             remaining: point_count,
             reader: self,
         }
-        .collect()
     }
 
     fn read_line(&mut self) -> Result<Line> {
@@ -914,12 +1070,11 @@ impl<'a, R: Read> CommandReader<'a, R> {
         Ok(Line { start, end })
     }
 
-    fn read_lines(&mut self, line_count: u32) -> Result<Vec<Line>> {
+    fn read_lines<'b>(&'b mut self, line_count: u32) -> Lines<'b, 'a, R> {
         Lines {
             remaining: line_count,
             reader: self,
         }
-        .collect()
     }
 
     fn read_rect(&mut self) -> Result<Rect> {
@@ -936,12 +1091,11 @@ impl<'a, R: Read> CommandReader<'a, R> {
         })
     }
 
-    fn read_rects(&mut self, rect_count: u32) -> Result<Vec<Rect>> {
+    fn read_rects<'b>(&'b mut self, rect_count: u32) -> Rects<'b, 'a, R> {
         Rects {
             remaining: rect_count,
             reader: self,
         }
-        .collect()
     }
 
     fn read_path_instr(&mut self) -> Result<PathInstr> {
@@ -1020,17 +1174,14 @@ impl<'a, R: Read> CommandReader<'a, R> {
         Ok(Segment { start, instrs })
     }
 
-    fn read_path(&mut self, segment_count: u32) -> Result<Path> {
-        let segments = Segments {
+    fn read_segments<'b>(&'b mut self, segment_count: u32) -> Segments<'b, 'a, R> {
+        Segments {
             remaining: segment_count,
             reader: self,
         }
-        .collect::<Result<Vec<_>>>()?;
-
-        Ok(Path { segments })
     }
 
-    pub fn read_cmd(&mut self) -> Result<Option<Cmd>> {
+    pub fn read_cmd<'b>(&'b mut self) -> Result<Option<CmdReader<'b, 'a, R>>> {
         if self.errored {
             return Err(TinyVgError::Fatal);
         }
@@ -1051,66 +1202,66 @@ impl<'a, R: Read> CommandReader<'a, R> {
 
             CmdId::FillPoly => {
                 let point_count = self.tvg.reader.read_var_u32()? + 1;
-                Some(Cmd::FillPoly {
+                Some(CmdReader::FillPoly {
                     fill_style: self.read_style(prim_style)?,
-                    points: self.read_points(point_count)?,
+                    points: self.read_points(point_count),
                 })
             }
 
             CmdId::FillRects => {
                 let rect_count = self.tvg.reader.read_var_u32()? + 1;
 
-                Some(Cmd::FillRects {
+                Some(CmdReader::FillRects {
                     fill_style: self.read_style(prim_style)?,
-                    rects: self.read_rects(rect_count)?,
+                    rects: self.read_rects(rect_count),
                 })
             }
 
             CmdId::FillPath => {
                 let segment_count = self.tvg.reader.read_var_u32()? + 1;
 
-                Some(Cmd::FillPath {
+                Some(CmdReader::FillPath {
                     fill_style: self.read_style(prim_style)?,
-                    path: self.read_path(segment_count)?,
+                    segments: self.read_segments(segment_count),
                 })
             }
 
             CmdId::DrawLines => {
                 let line_count = self.tvg.reader.read_var_u32()? + 1;
 
-                Some(Cmd::DrawLines {
+                Some(CmdReader::DrawLines {
                     line_style: self.read_style(prim_style)?,
                     width: self.read_unit()?,
-                    lines: self.read_lines(line_count)?,
+                    lines: self.read_lines(line_count),
                 })
             }
 
             CmdId::DrawLoop => {
                 let point_count = self.tvg.reader.read_var_u32()? + 1;
-                Some(Cmd::DrawLoop {
+                Some(CmdReader::DrawLoop {
                     line_style: self.read_style(prim_style)?,
                     width: self.read_unit()?,
-                    points: self.read_points(point_count)?,
+                    points: self.read_points(point_count),
                 })
             }
 
             CmdId::DrawStrip => {
                 let point_count = self.tvg.reader.read_var_u32()? + 1;
 
-                Some(Cmd::DrawStrip {
+                Some(CmdReader::DrawStrip {
                     line_style: self.read_style(prim_style)?,
                     width: self.read_unit()?,
-                    points: self.read_points(point_count)?,
+                    points: self.read_points(point_count),
                 })
             }
 
             CmdId::DrawPath => {
                 let segment_count = self.tvg.reader.read_var_u32()? + 1;
 
-                Some(Cmd::DrawPath {
+                Some(CmdReader::DrawPath {
                     line_style: self.read_style(prim_style)?,
                     width: self.read_unit()?,
-                    path: self.read_path(segment_count)?,
+                    segments: self.read_segments(segment_count),
                 })
             }
 
@@ -1119,11 +1270,11 @@ impl<'a, R: Read> CommandReader<'a, R> {
                 let point_count: u32 = (head.bits(0, 6) + 1).into();
                 let line_style_id = StyleId::try_from(head.bits(6, 2))?;
 
-                Some(Cmd::OutlineFillPoly {
+                Some(CmdReader::OutlineFillPoly {
                     fill_style: self.read_style(prim_style)?,
                     line_style: self.read_style(line_style_id)?,
                     line_width: self.read_unit()?,
-                    points: self.read_points(point_count)?,
+                    points: self.read_points(point_count),
                 })
             }
 
@@ -1132,11 +1283,11 @@ impl<'a, R: Read> CommandReader<'a, R> {
                 let rect_count: u32 = (head.bits(0, 6) + 1).into();
                 let line_style_id = StyleId::try_from(head.bits(6, 2))?;
 
-                Some(Cmd::OutlineFillRects {
+                Some(CmdReader::OutlineFillRects {
                     fill_style: self.read_style(prim_style)?,
                     line_style: self.read_style(line_style_id)?,
                     line_width: self.read_unit()?,
-                    rects: self.read_rects(rect_count)?,
+                    rects: self.read_rects(rect_count),
                 })
             }
 
@@ -1145,11 +1296,11 @@ impl<'a, R: Read> CommandReader<'a, R> {
                 let segment_count: u32 = (head.bits(0, 6) + 1).into();
                 let line_style_id = StyleId::try_from(head.bits(6, 2))?;
 
-                Some(Cmd::OutlineFillPath {
+                Some(CmdReader::OutlineFillPath {
                     fill_style: self.read_style(prim_style)?,
                     line_style: self.read_style(line_style_id)?,
                     line_width: self.read_unit()?,
-                    path: self.read_path(segment_count)?,
+                    segments: self.read_segments(segment_count),
                 })
             }
         };
@@ -1619,8 +1770,8 @@ impl<W: Write> CommandWriter<W> {
         Ok(())
     }
 
-    fn write_path(&mut self, path: Path) -> Result<()> {
-        for segment in path.segments {
+    fn write_segments(&mut self, segments: Vec<Segment>) -> Result<()> {
+        for segment in segments {
             self.write_segment(segment)?;
         }
 
@@ -1645,12 +1796,15 @@ impl<W: Write> CommandWriter<W> {
                 self.write_rects(rects.into_iter())?;
             }
 
-            Cmd::FillPath { fill_style, path } => {
+            Cmd::FillPath {
+                fill_style,
+                segments,
+            } => {
                 self.writer
                     .write_u8(CmdId::FillPath.with_style_id(fill_style.id()))?;
-                self.write_count(path.segments.len())?;
+                self.write_count(segments.len())?;
                 self.write_style(fill_style)?;
-                self.write_path(path)?;
+                self.write_segments(segments)?;
             }
 
             Cmd::DrawLines {
@@ -1695,14 +1849,14 @@ impl<W: Write> CommandWriter<W> {
             Cmd::DrawPath {
                 line_style,
                 width,
-                path,
+                segments,
             } => {
                 self.writer
                     .write_u8(CmdId::DrawPath.with_style_id(line_style.id()))?;
-                self.write_count(path.segments.len())?;
+                self.write_count(segments.len())?;
                 self.write_style(line_style)?;
                 self.write_unit(width)?;
-                self.write_path(path)?;
+                self.write_segments(segments)?;
             }
 
             Cmd::OutlineFillPoly {
@@ -1739,15 +1893,15 @@ impl<W: Write> CommandWriter<W> {
                 fill_style,
                 line_style,
                 line_width,
-                path,
+                segments,
             } => {
                 self.writer
                     .write_u8(CmdId::OutlineFillPath.with_style_id(fill_style.id()))?;
-                self.write_styled_count(path.segments.len(), line_style.id())?;
+                self.write_styled_count(segments.len(), line_style.id())?;
                 self.write_style(fill_style)?;
                 self.write_style(line_style)?;
                 self.write_unit(line_width)?;
-                self.write_path(path)?;
+                self.write_segments(segments)?;
             }
         }
 

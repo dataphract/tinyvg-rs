@@ -1,5 +1,5 @@
 use pretty_assertions::assert_eq;
-use tinyvg::{ColorTableEncoding, Rgba8888, TinyVgError, TinyVgReader, TinyVgWriter};
+use tinyvg::{Cmd, ColorTableEncoding, Rgba8888, TinyVgError, TinyVgReader, TinyVgWriter};
 
 #[test]
 pub fn roundtrip() -> Result<(), TinyVgError> {
@@ -15,9 +15,9 @@ pub fn roundtrip() -> Result<(), TinyVgError> {
 
     let commands = {
         let mut r = tvg.read_commands()?;
-        let mut c = Vec::new();
+        let mut c: Vec<Cmd> = Vec::new();
         while let Some(cmd) = r.read_cmd()? {
-            c.push(cmd);
+            c.push(cmd.try_into()?);
         }
         c
     };
@@ -41,9 +41,9 @@ pub fn roundtrip() -> Result<(), TinyVgError> {
     };
     let commands2 = {
         let mut r = tvg2.read_commands()?;
-        let mut c = Vec::new();
+        let mut c: Vec<Cmd> = Vec::new();
         while let Some(cmd) = r.read_cmd()? {
-            c.push(cmd);
+            c.push(cmd.try_into()?);
         }
         c
     };
