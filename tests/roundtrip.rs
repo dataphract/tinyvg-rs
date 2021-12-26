@@ -7,10 +7,12 @@ pub fn roundtrip() -> Result<(), TinyVgError> {
 
     let mut tvg = TinyVgReader::new(data.as_slice());
     let header = tvg.read_header()?;
+
     let table: Vec<Rgba8888> = match tvg.read_color_table()? {
         ColorTableEncoding::Rgba8888(r) => r.collect::<Result<Vec<_>, _>>()?,
         _ => panic!("unexpected color encoding"),
     };
+
     let commands = {
         let mut r = tvg.read_commands()?;
         let mut c = Vec::new();

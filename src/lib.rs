@@ -10,7 +10,7 @@
 //! use tinyvg::{ColorTableEncoding, TinyVgReader};
 //! # use tinyvg::TinyVgError;
 //!
-//! # pub fn f() -> Result<(), TinyVgError> {
+//! # pub fn f() -> tinyvg::Result<()> {
 //! let mut f = File::open("example.tvg")?;
 //! let mut r = TinyVgReader::new(&mut f);
 //!
@@ -43,6 +43,8 @@ use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 
 const MAGIC: [u8; 2] = [0x72, 0x56];
 const VERSION: u8 = 1;
+
+pub type Result<T> = std::result::Result<T, TinyVgError>;
 
 #[derive(Debug)]
 pub enum TinyVgError {
@@ -198,7 +200,7 @@ pub struct RgbaF32 {
 impl TryFrom<u8> for ColorEncodingTag {
     type Error = TinyVgError;
 
-    fn try_from(value: u8) -> Result<ColorEncodingTag, TinyVgError> {
+    fn try_from(value: u8) -> Result<ColorEncodingTag> {
         use ColorEncodingTag::*;
         match value {
             0 => Ok(Rgba8888),
@@ -213,8 +215,8 @@ impl TryFrom<u8> for ColorEncodingTag {
 pub trait ColorEncoding: Sized {
     // TODO: end users should not be able to implement this method.
     fn tag() -> ColorEncodingTag;
-    fn read_table_entry<R: Read>(reader: R) -> Result<Self, TinyVgError>;
-    fn write_table_entry<W: Write>(&self, writer: W) -> Result<(), TinyVgError>;
+    fn read_table_entry<R: Read>(reader: R) -> Result<Self>;
+    fn write_table_entry<W: Write>(&self, writer: W) -> Result<()>;
 }
 
 impl ColorEncoding for Rgba8888 {
@@ -222,7 +224,7 @@ impl ColorEncoding for Rgba8888 {
         ColorEncodingTag::Rgba8888
     }
 
-    fn read_table_entry<R: Read>(mut reader: R) -> Result<Rgba8888, TinyVgError> {
+    fn read_table_entry<R: Read>(mut reader: R) -> Result<Rgba8888> {
         let red = reader.read_u8()?;
         let green = reader.read_u8()?;
         let blue = reader.read_u8()?;
@@ -236,7 +238,7 @@ impl ColorEncoding for Rgba8888 {
         })
     }
 
-    fn write_table_entry<W: Write>(&self, mut writer: W) -> Result<(), TinyVgError> {
+    fn write_table_entry<W: Write>(&self, mut writer: W) -> Result<()> {
         writer.write_u8(self.red)?;
         writer.write_u8(self.green)?;
         writer.write_u8(self.blue)?;
@@ -251,14 +253,14 @@ impl ColorEncoding for Rgb565 {
         ColorEncodingTag::Rgb565
     }
 
-    fn read_table_entry<R: Read>(mut reader: R) -> Result<Rgb565, TinyVgError> {
+    fn read_table_entry<R: Read>(mut reader: R) -> Result<Rgb565> {
         let mut bytes = [0u8; 2];
         reader.read_exact(&mut bytes)?;
 
         Ok(Rgb565 { bytes })
     }
 
-    fn write_table_entry<W: Write>(&self, mut writer: W) -> Result<(), TinyVgError> {
+    fn write_table_entry<W: Write>(&self, mut writer: W) -> Result<()> {
         writer.write_all(&self.bytes)?;
 
         Ok(())
@@ -270,7 +272,7 @@ impl ColorEncoding for RgbaF32 {
         ColorEncodingTag::RgbaF32
     }
 
-    fn read_table_entry<R: Read>(mut reader: R) -> Result<RgbaF32, TinyVgError> {
+    fn read_table_entry<R: Read>(mut reader: R) -> Result<RgbaF32> {
         let red = reader.read_f32::<LE>()?;
         let green = reader.read_f32::<LE>()?;
         let blue = reader.read_f32::<LE>()?;
@@ -285,7 +287,7 @@ impl ColorEncoding for RgbaF32 {
         })
     }
 
-    fn write_table_entry<W: Write>(&self, mut writer: W) -> Result<(), TinyVgError> {
+    fn write_table_entry<W: Write>(&self, mut writer: W) -> Result<()> {
         writer.write_f32::<LE>(self.red)?;
         writer.write_f32::<LE>(self.green)?;
         writer.write_f32::<LE>(self.blue)?;
@@ -300,11 +302,11 @@ impl ColorEncoding for () {
         ColorEncodingTag::Custom
     }
 
-    fn read_table_entry<R: Read>(_reader: R) -> Result<(), TinyVgError> {
+    fn read_table_entry<R: Read>(_reader: R) -> Result<()> {
         Ok(())
     }
 
-    fn write_table_entry<W: Write>(&self, _writer: W) -> Result<(), TinyVgError> {
+    fn write_table_entry<W: Write>(&self, _writer: W) -> Result<()> {
         Ok(())
     }
 }
@@ -333,7 +335,7 @@ impl<'a, R: Read, C: ColorEncoding> ColorTableEntries<'a, R, C> {
 }
 
 impl<'a, R: Read, C: ColorEncoding> Iterator for ColorTableEntries<'a, R, C> {
-    type Item = Result<C, TinyVgError>;
+    type Item = Result<C>;
 
     fn next(&mut self) -> Option<Self::Item> {
         (self.tvg.colors_read < self.header.color_count).then(|| {
@@ -389,21 +391,21 @@ impl CoordinateRange {
         }
     }
 
-    fn write_default<W: Write>(writer: &mut W, value: i32) -> Result<(), TinyVgError> {
+    fn write_default<W: Write>(writer: &mut W, value: i32) -> Result<()> {
         let v = value.try_into().map_err(|_| TinyVgError::OutOfRange)?;
         writer.write_i16::<LE>(v)?;
 
         Ok(())
     }
 
-    fn write_reduced<W: Write>(writer: &mut W, value: i32) -> Result<(), TinyVgError> {
+    fn write_reduced<W: Write>(writer: &mut W, value: i32) -> Result<()> {
         let v = value.try_into().map_err(|_| TinyVgError::OutOfRange)?;
         writer.write_i8(v)?;
 
         Ok(())
     }
 
-    fn write_enhanced<W: Write>(writer: &mut W, value: i32) -> Result<(), TinyVgError> {
+    fn write_enhanced<W: Write>(writer: &mut W, value: i32) -> Result<()> {
         writer.write_i32::<LE>(value)?;
 
         Ok(())
@@ -414,7 +416,7 @@ impl CoordinateRange {
     ///
     /// The returned function writes unscaled unit values; the value passed in
     /// by the caller should already be multiplied by the scaling factor.
-    fn write_fn<W: Write>(self) -> fn(&mut W, i32) -> Result<(), TinyVgError> {
+    fn write_fn<W: Write>(self) -> fn(&mut W, i32) -> Result<()> {
         match self {
             CoordinateRange::Default => CoordinateRange::write_default,
             CoordinateRange::Reduced => CoordinateRange::write_reduced,
@@ -426,7 +428,7 @@ impl CoordinateRange {
 impl TryFrom<u8> for CoordinateRange {
     type Error = TinyVgError;
 
-    fn try_from(value: u8) -> Result<CoordinateRange, TinyVgError> {
+    fn try_from(value: u8) -> Result<CoordinateRange> {
         use CoordinateRange::*;
         match value {
             0 => Ok(Default),
@@ -447,7 +449,7 @@ enum StyleId {
 impl TryFrom<u8> for StyleId {
     type Error = TinyVgError;
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> Result<Self> {
         match value {
             0 => Ok(StyleId::FlatColor),
             1 => Ok(StyleId::LinearGradient),
@@ -493,12 +495,90 @@ pub struct Point {
     y: f32,
 }
 
+/// A stream of [`Point`]s being read from TinyVG data.
+pub struct Points<'a, 'b, R: Read> {
+    remaining: u32,
+    reader: &'a mut CommandReader<'b, R>,
+}
+
+impl<'a, 'b, R: Read> Iterator for Points<'a, 'b, R> {
+    type Item = Result<Point>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining > 0 {
+            let point = self.reader.read_point();
+
+            if point.is_ok() {
+                self.remaining -= 1;
+            } else {
+                self.reader.errored = true;
+            }
+
+            Some(point)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a, 'b, R: Read> Drop for Points<'a, 'b, R> {
+    fn drop(&mut self) {
+        // Attempt to read through the remaining points.
+        while let Some(res) = self.next() {
+            // If a read fails, set the error flag in the CommandReader, causing
+            // future reads to fail as well.
+            if res.is_err() {
+                self.reader.errored = true;
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rect {
     x: f32,
     y: f32,
     width: f32,
     height: f32,
+}
+
+/// A stream of [`Rect`]s being read from TinyVG data.
+pub struct Rects<'a, 'b, R: Read> {
+    remaining: u32,
+    reader: &'a mut CommandReader<'b, R>,
+}
+
+impl<'a, 'b, R: Read> Iterator for Rects<'a, 'b, R> {
+    type Item = Result<Rect>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining > 0 {
+            let rect = self.reader.read_rect();
+
+            if rect.is_ok() {
+                self.remaining -= 1;
+            } else {
+                self.reader.errored = true;
+            }
+
+            Some(rect)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a, 'b, R: Read> Drop for Rects<'a, 'b, R> {
+    fn drop(&mut self) {
+        // Attempt to read through the remaining rects.
+        while let Some(res) = self.next() {
+            // If a read fails, set the error flag in the CommandReader, causing
+            // future reads to fail as well.
+            if res.is_err() {
+                self.reader.errored = true;
+            }
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -510,7 +590,7 @@ pub enum ArcSweep {
 impl TryFrom<u8> for ArcSweep {
     type Error = TinyVgError;
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> Result<Self> {
         match value {
             0 => Ok(ArcSweep::Cw),
             1 => Ok(ArcSweep::Ccw),
@@ -588,6 +668,31 @@ pub struct Segment {
     pub instrs: Vec<PathInstr>,
 }
 
+pub struct Segments<'a, 'b, R: Read> {
+    remaining: u32,
+    reader: &'a mut CommandReader<'b, R>,
+}
+
+impl<'a, 'b, R: Read> Iterator for Segments<'a, 'b, R> {
+    type Item = Result<Segment>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining > 0 {
+            let segment = self.reader.read_segment();
+
+            if segment.is_ok() {
+                self.remaining -= 1;
+            } else {
+                self.reader.errored = true;
+            }
+
+            Some(segment)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Path {
     pub segments: Vec<Segment>,
@@ -597,6 +702,45 @@ pub struct Path {
 pub struct Line {
     pub start: Point,
     pub end: Point,
+}
+
+/// A stream of [`Line`]s being read from TinyVG data.
+pub struct Lines<'a, 'b, R: Read> {
+    remaining: u32,
+    reader: &'a mut CommandReader<'b, R>,
+}
+
+impl<'a, 'b, R: Read> Iterator for Lines<'a, 'b, R> {
+    type Item = Result<Line>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining > 0 {
+            let line = self.reader.read_line();
+
+            if line.is_ok() {
+                self.remaining -= 1;
+            } else {
+                self.reader.errored = true;
+            }
+
+            Some(line)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a, 'b, R: Read> Drop for Lines<'a, 'b, R> {
+    fn drop(&mut self) {
+        // Attempt to read through the remaining lines.
+        while let Some(res) = self.next() {
+            // If a read fails, set the error flag in the CommandReader, causing
+            // future reads to fail as well.
+            if res.is_err() {
+                self.reader.errored = true;
+            }
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -623,7 +767,7 @@ impl CmdId {
 impl TryFrom<u8> for CmdId {
     type Error = TinyVgError;
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> Result<Self> {
         use CmdId::*;
 
         let cmd = match value {
@@ -712,13 +856,16 @@ pub struct TinyVgHeader {
 // TinyVG reading =================================================================================
 
 pub struct CommandReader<'a, R: Read> {
+    // TODO: provide more context
+    errored: bool,
+
     header: TinyVgHeader,
     read_unit_fn: fn(&mut R) -> io::Result<i32>,
     tvg: &'a mut TinyVgReader<R>,
 }
 
 impl<'a, R: Read> CommandReader<'a, R> {
-    fn read_style(&mut self, id: StyleId) -> Result<Style, TinyVgError> {
+    fn read_style(&mut self, id: StyleId) -> Result<Style> {
         let style = match id {
             StyleId::FlatColor => Style::FlatColor {
                 color: self.tvg.reader.read_var_u32()?,
@@ -745,33 +892,37 @@ impl<'a, R: Read> CommandReader<'a, R> {
         Ok(num as f32 / (1 << self.header.scale) as f32)
     }
 
-    fn read_point(&mut self) -> Result<Point, TinyVgError> {
+    fn read_point(&mut self) -> Result<Point> {
         let x = self.read_unit()?;
         let y = self.read_unit()?;
 
         Ok(Point { x, y })
     }
 
-    fn read_points(&mut self, point_count: u32) -> Result<Vec<Point>, TinyVgError> {
-        iter::repeat_with(|| self.read_point())
-            .take(point_count as usize)
-            .collect::<Result<Vec<_>, _>>()
+    fn read_points(&mut self, point_count: u32) -> Result<Vec<Point>> {
+        Points {
+            remaining: point_count,
+            reader: self,
+        }
+        .collect()
     }
 
-    fn read_line(&mut self) -> Result<Line, TinyVgError> {
+    fn read_line(&mut self) -> Result<Line> {
         let start = self.read_point()?;
         let end = self.read_point()?;
 
         Ok(Line { start, end })
     }
 
-    fn read_lines(&mut self, line_count: u32) -> Result<Vec<Line>, TinyVgError> {
-        iter::repeat_with(|| self.read_line())
-            .take(line_count as usize)
-            .collect::<Result<Vec<_>, _>>()
+    fn read_lines(&mut self, line_count: u32) -> Result<Vec<Line>> {
+        Lines {
+            remaining: line_count,
+            reader: self,
+        }
+        .collect()
     }
 
-    fn read_rect(&mut self) -> Result<Rect, TinyVgError> {
+    fn read_rect(&mut self) -> Result<Rect> {
         let x = self.read_unit()?;
         let y = self.read_unit()?;
         let width = self.read_unit()?;
@@ -785,13 +936,15 @@ impl<'a, R: Read> CommandReader<'a, R> {
         })
     }
 
-    fn read_rects(&mut self, rect_count: u32) -> Result<Vec<Rect>, TinyVgError> {
-        iter::repeat_with(|| self.read_rect())
-            .take(rect_count as usize)
-            .collect::<Result<Vec<_>, _>>()
+    fn read_rects(&mut self, rect_count: u32) -> Result<Vec<Rect>> {
+        Rects {
+            remaining: rect_count,
+            reader: self,
+        }
+        .collect()
     }
 
-    fn read_path_instr(&mut self) -> Result<PathInstr, TinyVgError> {
+    fn read_path_instr(&mut self) -> Result<PathInstr> {
         let tag = self.tvg.reader.read_u8()?;
 
         let instr = tag.bits(0, 3);
@@ -857,25 +1010,31 @@ impl<'a, R: Read> CommandReader<'a, R> {
         Ok(PathInstr { kind, line_width })
     }
 
-    fn read_segment(&mut self) -> Result<Segment, TinyVgError> {
+    fn read_segment(&mut self) -> Result<Segment> {
         let instr_count = self.tvg.reader.read_var_u32()? + 1;
         let start = self.read_point()?;
         let instrs = iter::repeat_with(|| self.read_path_instr())
             .take(instr_count as usize)
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(Segment { start, instrs })
     }
 
-    fn read_path(&mut self, segment_count: u32) -> Result<Path, TinyVgError> {
-        let segments = iter::repeat_with(|| self.read_segment())
-            .take(segment_count as usize)
-            .collect::<Result<Vec<_>, _>>()?;
+    fn read_path(&mut self, segment_count: u32) -> Result<Path> {
+        let segments = Segments {
+            remaining: segment_count,
+            reader: self,
+        }
+        .collect::<Result<Vec<_>>>()?;
 
         Ok(Path { segments })
     }
 
-    pub fn read_cmd(&mut self) -> Result<Option<Cmd>, TinyVgError> {
+    pub fn read_cmd(&mut self) -> Result<Option<Cmd>> {
+        if self.errored {
+            return Err(TinyVgError::Fatal);
+        }
+
         if self.tvg.commands_finished {
             return Ok(None);
         }
@@ -1017,7 +1176,7 @@ impl<R: Read> TinyVgReader<R> {
         }
     }
 
-    pub fn read_header(&mut self) -> Result<TinyVgHeader, TinyVgError> {
+    pub fn read_header(&mut self) -> Result<TinyVgHeader> {
         match self.header {
             Some(_) => Err(TinyVgError::BadPosition),
             None => {
@@ -1028,13 +1187,13 @@ impl<R: Read> TinyVgReader<R> {
         }
     }
 
-    pub fn read_color_table(&mut self) -> Result<ColorTableEncoding<R, ()>, TinyVgError> {
+    pub fn read_color_table(&mut self) -> Result<ColorTableEncoding<R, ()>> {
         self.read_custom_color_table::<()>()
     }
 
     pub fn read_custom_color_table<C: ColorEncoding>(
         &mut self,
-    ) -> Result<ColorTableEncoding<R, C>, TinyVgError> {
+    ) -> Result<ColorTableEncoding<R, C>> {
         let header = match self.header {
             Some(header) => header,
             None => return Err(TinyVgError::BadPosition),
@@ -1056,7 +1215,7 @@ impl<R: Read> TinyVgReader<R> {
         Ok(enc)
     }
 
-    pub fn read_commands(&mut self) -> Result<CommandReader<R>, TinyVgError> {
+    pub fn read_commands(&mut self) -> Result<CommandReader<R>> {
         let header = match self.header {
             Some(header) => header,
             None => return Err(TinyVgError::BadPosition),
@@ -1067,13 +1226,14 @@ impl<R: Read> TinyVgReader<R> {
         }
 
         Ok(CommandReader {
+            errored: false,
             header,
             read_unit_fn: header.range.read_fn(),
             tvg: self,
         })
     }
 
-    pub fn finish(self) -> Result<R, Self> {
+    pub fn finish(self) -> std::result::Result<R, Self> {
         if self.commands_finished {
             Ok(self.reader)
         } else {
@@ -1082,7 +1242,7 @@ impl<R: Read> TinyVgReader<R> {
     }
 }
 
-fn read_header<R: Read>(mut reader: R) -> Result<TinyVgHeader, TinyVgError> {
+fn read_header<R: Read>(mut reader: R) -> Result<TinyVgHeader> {
     let magic = {
         let mut m = [0u8; 2];
         reader.read_exact(&mut m)?;
@@ -1137,10 +1297,7 @@ impl<W: Write> TinyVgWriter<W> {
         TinyVgWriter { writer }
     }
 
-    pub fn write_header(
-        mut self,
-        header: TinyVgHeader,
-    ) -> Result<ColorTableWriter<W>, TinyVgError> {
+    pub fn write_header(mut self, header: TinyVgHeader) -> Result<ColorTableWriter<W>> {
         self.writer.write_all(&MAGIC)?;
         self.writer.write_u8(VERSION)?;
 
@@ -1176,7 +1333,7 @@ pub struct ColorTableWriter<W: Write> {
 }
 
 impl<W: Write> ColorTableWriter<W> {
-    pub fn write_color_table<I, C>(mut self, colors: I) -> Result<CommandWriter<W>, TinyVgError>
+    pub fn write_color_table<I, C>(mut self, colors: I) -> Result<CommandWriter<W>>
     where
         I: ExactSizeIterator<Item = C>,
         C: ColorEncoding,
@@ -1216,12 +1373,12 @@ impl<W: Write> ColorTableWriter<W> {
 pub struct CommandWriter<W: Write> {
     header: TinyVgHeader,
     color_count: u32,
-    write_unit_fn: fn(&mut W, i32) -> Result<(), TinyVgError>,
+    write_unit_fn: fn(&mut W, i32) -> Result<()>,
     writer: W,
 }
 
 impl<W: Write> CommandWriter<W> {
-    fn write_unit(&mut self, unit: f32) -> Result<(), TinyVgError> {
+    fn write_unit(&mut self, unit: f32) -> Result<()> {
         let unscaled = unit * (1 << self.header.scale) as f32;
 
         // TODO: Casting to i32 will clamp values to [i32::MIN, i32::MAX].
@@ -1232,7 +1389,7 @@ impl<W: Write> CommandWriter<W> {
         Ok(())
     }
 
-    fn write_count(&mut self, count: usize) -> Result<(), TinyVgError> {
+    fn write_count(&mut self, count: usize) -> Result<()> {
         let as_u32: u32 = count.try_into().map_err(|_| TinyVgError::OutOfRange)?;
         self.writer
             .write_var_u32(as_u32.checked_sub(1).ok_or(TinyVgError::InvalidData)?)?;
@@ -1241,7 +1398,7 @@ impl<W: Write> CommandWriter<W> {
     }
 
     const U6_MAX: u8 = (1 << 6) - 1;
-    fn write_styled_count(&mut self, count: usize, style_id: StyleId) -> Result<(), TinyVgError> {
+    fn write_styled_count(&mut self, count: usize, style_id: StyleId) -> Result<()> {
         if count - 1 > Self::U6_MAX as usize {
             return Err(TinyVgError::OutOfRange);
         }
@@ -1252,14 +1409,14 @@ impl<W: Write> CommandWriter<W> {
         Ok(())
     }
 
-    fn write_point(&mut self, point: Point) -> Result<(), TinyVgError> {
+    fn write_point(&mut self, point: Point) -> Result<()> {
         self.write_unit(point.x)?;
         self.write_unit(point.y)?;
 
         Ok(())
     }
 
-    fn write_points<P>(&mut self, points: P) -> Result<(), TinyVgError>
+    fn write_points<P>(&mut self, points: P) -> Result<()>
     where
         P: ExactSizeIterator<Item = Point>,
     {
@@ -1270,14 +1427,14 @@ impl<W: Write> CommandWriter<W> {
         Ok(())
     }
 
-    fn write_line(&mut self, line: Line) -> Result<(), TinyVgError> {
+    fn write_line(&mut self, line: Line) -> Result<()> {
         self.write_point(line.start)?;
         self.write_point(line.end)?;
 
         Ok(())
     }
 
-    fn write_lines<L>(&mut self, lines: L) -> Result<(), TinyVgError>
+    fn write_lines<L>(&mut self, lines: L) -> Result<()>
     where
         L: ExactSizeIterator<Item = Line>,
     {
@@ -1288,7 +1445,7 @@ impl<W: Write> CommandWriter<W> {
         Ok(())
     }
 
-    fn write_rect(&mut self, rect: Rect) -> Result<(), TinyVgError> {
+    fn write_rect(&mut self, rect: Rect) -> Result<()> {
         self.write_unit(rect.x)?;
         self.write_unit(rect.y)?;
         self.write_unit(rect.width)?;
@@ -1297,7 +1454,7 @@ impl<W: Write> CommandWriter<W> {
         Ok(())
     }
 
-    fn write_rects<R>(&mut self, rects: R) -> Result<(), TinyVgError>
+    fn write_rects<R>(&mut self, rects: R) -> Result<()>
     where
         R: ExactSizeIterator<Item = Rect>,
     {
@@ -1308,7 +1465,7 @@ impl<W: Write> CommandWriter<W> {
         Ok(())
     }
 
-    fn write_style(&mut self, style: Style) -> Result<(), TinyVgError> {
+    fn write_style(&mut self, style: Style) -> Result<()> {
         match style {
             Style::FlatColor { color } => {
                 if color >= self.color_count {
@@ -1343,7 +1500,7 @@ impl<W: Write> CommandWriter<W> {
         Ok(())
     }
 
-    fn write_path_instr(&mut self, instr: PathInstr) -> Result<(), TinyVgError> {
+    fn write_path_instr(&mut self, instr: PathInstr) -> Result<()> {
         let (has_width, width) = match instr.line_width {
             Some(w) => (true, w),
             None => (false, 0.0),
@@ -1452,7 +1609,7 @@ impl<W: Write> CommandWriter<W> {
         Ok(())
     }
 
-    fn write_segment(&mut self, segment: Segment) -> Result<(), TinyVgError> {
+    fn write_segment(&mut self, segment: Segment) -> Result<()> {
         self.write_count(segment.instrs.len())?;
         self.write_point(segment.start)?;
         for instr in segment.instrs {
@@ -1462,7 +1619,7 @@ impl<W: Write> CommandWriter<W> {
         Ok(())
     }
 
-    fn write_path(&mut self, path: Path) -> Result<(), TinyVgError> {
+    fn write_path(&mut self, path: Path) -> Result<()> {
         for segment in path.segments {
             self.write_segment(segment)?;
         }
@@ -1470,7 +1627,7 @@ impl<W: Write> CommandWriter<W> {
         Ok(())
     }
 
-    pub fn write_command(&mut self, command: Cmd) -> Result<(), TinyVgError> {
+    pub fn write_command(&mut self, command: Cmd) -> Result<()> {
         match command {
             Cmd::FillPoly { fill_style, points } => {
                 self.writer
@@ -1597,7 +1754,7 @@ impl<W: Write> CommandWriter<W> {
         Ok(())
     }
 
-    pub fn finish(mut self) -> Result<W, TinyVgError> {
+    pub fn finish(mut self) -> Result<W> {
         self.writer.write_u8(0)?;
         Ok(self.writer)
     }
