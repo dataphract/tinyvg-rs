@@ -1,4 +1,36 @@
 //! A library for reading and writing the TinyVG vector graphics format.
+//!
+//! # Examples
+//!
+//! ## Reading a TinyVG file
+//!
+//! ```no_run
+//! use std::fs::File;
+//!
+//! use tinyvg::{ColorTableEncoding, TinyVgReader};
+//! # use tinyvg::TinyVgError;
+//!
+//! # pub fn f() -> Result<(), TinyVgError> {
+//! let mut f = File::open("example.tvg")?;
+//! let mut r = TinyVgReader::new(&mut f);
+//!
+//! let header = r.read_header()?;
+//!
+//! let table = match r.read_color_table()? {
+//!     ColorTableEncoding::Rgba8888(r) => r.collect::<Result<Vec<_>, _>>()?,
+//!     _ => panic!("expected RGBA8888 color encoding"),
+//! };
+//!
+//! let mut commands = Vec::new();
+//! let mut cr = r.read_commands()?;
+//! while let Some(cmd) = cr.read_cmd()? {
+//!     commands.push(cmd);
+//! }
+//!
+//! println!("Number of commands: {}", commands.len());
+//! # Ok(())
+//! # }
+//! ```
 
 use std::{
     io::{self, Read, Write},
