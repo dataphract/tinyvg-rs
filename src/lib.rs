@@ -33,12 +33,14 @@
 //! ```
 
 use std::{
+    fmt,
     io::{self, Read, Write},
     iter,
     marker::PhantomData,
     ops::{BitAnd, Shl, Shr, Sub},
 };
 
+use arrayvec::ArrayVec;
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 
 const MAGIC: [u8; 2] = [0x72, 0x56];
@@ -47,7 +49,7 @@ const VERSION: u8 = 1;
 pub type Result<T> = std::result::Result<T, TinyVgError>;
 
 #[derive(Debug)]
-pub enum TinyVgError {
+pub enum ErrorKind {
     Io(io::Error),
     InvalidData,
     OutOfRange,
@@ -57,16 +59,51 @@ pub enum TinyVgError {
     Fatal,
 }
 
+impl fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ErrorKind::Io(e) => write!(f, "I/O error: {}", e),
+            ErrorKind::InvalidData => write!(f, "Invalid data"),
+            ErrorKind::OutOfRange => write!(f, "Value out of range"),
+            ErrorKind::Unsupported => write!(f, "Unsupported"),
+            ErrorKind::NoSuchColor => write!(f, "No such color"),
+            ErrorKind::BadPosition => write!(f, "Bad position"),
+            ErrorKind::Fatal => write!(f, "Fatal error"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct TinyVgError {
+    kind: ErrorKind,
+    msg: &'static str,
+}
+
+impl fmt::Display for TinyVgError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.kind, self.msg)
+    }
+}
+
+impl From<ErrorKind> for TinyVgError {
+    fn from(kind: ErrorKind) -> Self {
+        TinyVgError { kind, msg: "" }
+    }
+}
+
 impl From<io::Error> for TinyVgError {
     fn from(e: io::Error) -> Self {
-        TinyVgError::Io(e)
+        TinyVgError {
+            kind: ErrorKind::Io(e),
+            msg: "",
+        }
     }
 }
 
 // VarUInt encoding/decoding ======================================================================
 
 trait ReadVarU32Ext: Read {
-    fn read_var_u32(&mut self) -> io::Result<u32> {
+    fn read_var_u32(&mut self) -> Result<u32> {
         let mut out = 0;
 
         // Read up to 5 bytes of VarUInt encoding.
@@ -89,10 +126,10 @@ trait ReadVarU32Ext: Read {
         // 0b1000.
         let b = self.read_u8()?;
         if b & 0xF0 != 0x80 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid 5th byte in VarUInt encoding",
-            ));
+            return Err(TinyVgError {
+                kind: ErrorKind::InvalidData,
+                msg: "Invalid 5th byte in VarUInt encoding",
+            });
         }
 
         // Mask off the high 4 bits and shift into position.
@@ -161,42 +198,6 @@ pub enum ColorEncodingTag {
     Custom = 3,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Rgba8888 {
-    pub red: u8,
-    pub green: u8,
-    pub blue: u8,
-    pub alpha: u8,
-}
-
-impl From<Rgb565> for Rgba8888 {
-    fn from(c: Rgb565) -> Self {
-        let red = c.bytes[0].bits(0, 5);
-        let green = c.bytes[1].bits(0, 3) << 3 | c.bytes[0].bits(5, 3);
-        let blue = c.bytes[1].bits(3, 5);
-
-        Rgba8888 {
-            red,
-            green,
-            blue,
-            alpha: 1,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Rgb565 {
-    bytes: [u8; 2],
-}
-
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct RgbaF32 {
-    red: f32,
-    green: f32,
-    blue: f32,
-    alpha: f32,
-}
-
 impl TryFrom<u8> for ColorEncodingTag {
     type Error = TinyVgError;
 
@@ -207,15 +208,110 @@ impl TryFrom<u8> for ColorEncodingTag {
             1 => Ok(Rgb565),
             2 => Ok(RgbaF32),
             3 => Ok(Custom),
-            _ => Err(TinyVgError::InvalidData),
+            _ => Err(TinyVgError {
+                kind: ErrorKind::InvalidData,
+                msg: "unrecognized color encoding tag",
+            }),
         }
     }
 }
 
+/// A color encoded as RGBA8888.
+///
+/// This color has red, green, blue and alpha channels, each encoded as a `u8`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Rgba8888 {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+    pub alpha: u8,
+}
+
+impl From<Rgb565> for Rgba8888 {
+    fn from(c: Rgb565) -> Self {
+        Rgba8888 {
+            red: c.red() << 3,
+            green: c.green() << 2,
+            blue: c.blue() << 3,
+            alpha: 1,
+        }
+    }
+}
+
+/// A color encoded as RGB565.
+///
+/// This color has a 5-bit red channel, a 6-bit green channel, and a 5-bit blue
+/// channel.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Rgb565 {
+    bytes: [u8; 2],
+}
+
+impl Rgb565 {
+    pub fn new(red: u8, green: u8, blue: u8) -> Option<Rgb565> {
+        if red >= (1 << 5) || green >= (1 << 6) || blue >= (1 << 5) {
+            None
+        } else {
+            Some(Rgb565 {
+                bytes: [green << 5 | red, blue << 3 | green >> 3],
+            })
+        }
+    }
+
+    pub fn red(&self) -> u8 {
+        self.bytes[0].bits(0, 5)
+    }
+
+    pub fn green(&self) -> u8 {
+        self.bytes[1].bits(0, 3) << 3 | self.bytes[0].bits(5, 3)
+    }
+
+    pub fn blue(&self) -> u8 {
+        self.bytes[1].bits(3, 5)
+    }
+}
+
+/// A color encoded as RGBAF32.
+///
+/// This color has red, green, blue and alpha channels, each encoded as an `f32`
+/// in the range [0.0, 1.0].
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct RgbaF32 {
+    red: f32,
+    green: f32,
+    blue: f32,
+    alpha: f32,
+}
+
+impl From<Rgba8888> for RgbaF32 {
+    fn from(c: Rgba8888) -> Self {
+        RgbaF32 {
+            red: c.red as f32 / 255.0,
+            green: c.green as f32 / 255.0,
+            blue: c.blue as f32 / 255.0,
+            alpha: c.alpha as f32 / 255.0,
+        }
+    }
+}
+
+impl From<Rgb565> for RgbaF32 {
+    fn from(c: Rgb565) -> Self {
+        Self::from(Rgba8888::from(c))
+    }
+}
+
+/// A trait for TinyVG color table encodings.
+///
+/// Implementors of this trait can be read from and written to the TinyVG color
+/// table.
 pub trait ColorEncoding: Sized {
     // TODO: end users should not be able to implement this method.
     fn tag() -> ColorEncodingTag;
+
+    /// Reads a single entry from the color table.
     fn read_table_entry<R: Read>(reader: R) -> Result<Self>;
+
+    /// Writes a single entry to the color table.
     fn write_table_entry<W: Write>(&self, writer: W) -> Result<()>;
 }
 
@@ -318,6 +414,33 @@ pub enum ColorTableEncoding<'a, R: Read, C: ColorEncoding = ()> {
     Custom(ColorTableEntries<'a, R, C>),
 }
 
+impl<'a, R: Read> ColorTableEncoding<'a, R, ()> {
+    pub fn to_rgba_f32(self) -> ToRgbaF32<'a, R> {
+        ToRgbaF32 { encoding: self }
+    }
+}
+
+pub struct ToRgbaF32<'a, R: Read> {
+    encoding: ColorTableEncoding<'a, R, ()>,
+}
+
+impl<'a, R: Read> Iterator for ToRgbaF32<'a, R> {
+    type Item = Result<RgbaF32>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.encoding {
+            ColorTableEncoding::Rgba8888(ref mut r) => r.next().map(|res| res.map(RgbaF32::from)),
+            ColorTableEncoding::Rgb565(ref mut r) => r.next().map(|res| res.map(RgbaF32::from)),
+            ColorTableEncoding::RgbaF32(ref mut r) => r.next().map(|res| res.map(RgbaF32::from)),
+            ColorTableEncoding::Custom(_) => Some(Err(TinyVgError {
+                kind: ErrorKind::Unsupported,
+                msg: "cannot convert custom type to RGBAF32",
+            })),
+        }
+    }
+}
+
+/// An iterator over the entries of the TinyVG color table.
 pub struct ColorTableEntries<'a, R: Read, C: ColorEncoding> {
     header: TinyVgHeader,
     tvg: &'a mut TinyVgReader<R>,
@@ -371,7 +494,9 @@ impl CoordinateRange {
     }
 
     fn read_reduced<R: Read>(reader: &mut R) -> io::Result<i32> {
-        reader.read_i8().map(i8::into)
+        let v = reader.read_i8().map(i8::into)?;
+        println!("value: {}", v);
+        Ok(v)
     }
 
     fn read_enhanced<R: Read>(reader: &mut R) -> io::Result<i32> {
@@ -392,14 +517,14 @@ impl CoordinateRange {
     }
 
     fn write_default<W: Write>(writer: &mut W, value: i32) -> Result<()> {
-        let v = value.try_into().map_err(|_| TinyVgError::OutOfRange)?;
+        let v = value.try_into().map_err(|_| ErrorKind::OutOfRange)?;
         writer.write_i16::<LE>(v)?;
 
         Ok(())
     }
 
     fn write_reduced<W: Write>(writer: &mut W, value: i32) -> Result<()> {
-        let v = value.try_into().map_err(|_| TinyVgError::OutOfRange)?;
+        let v = value.try_into().map_err(|_| ErrorKind::OutOfRange)?;
         writer.write_i8(v)?;
 
         Ok(())
@@ -434,7 +559,10 @@ impl TryFrom<u8> for CoordinateRange {
             0 => Ok(Default),
             1 => Ok(Reduced),
             2 => Ok(Enhanced),
-            _ => Err(TinyVgError::InvalidData),
+            _ => Err(TinyVgError {
+                kind: ErrorKind::InvalidData,
+                msg: "unrecognized coordinate range tag",
+            }),
         }
     }
 }
@@ -454,7 +582,10 @@ impl TryFrom<u8> for StyleId {
             0 => Ok(StyleId::FlatColor),
             1 => Ok(StyleId::LinearGradient),
             2 => Ok(StyleId::RadialGradient),
-            _ => Err(TinyVgError::InvalidData),
+            _ => Err(TinyVgError {
+                kind: ErrorKind::InvalidData,
+                msg: "unrecognized style type tag",
+            }),
         }
     }
 }
@@ -462,15 +593,16 @@ impl TryFrom<u8> for StyleId {
 /// The style of an element.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Style {
-    FlatColor {
-        color: u32,
-    },
+    /// The entire element is a single color.
+    FlatColor { color: u32 },
+    /// The element is colored with a linear gradient.
     LinearGradient {
         start: Point,
         end: Point,
         start_color: u32,
         end_color: u32,
     },
+    /// The element is colored with a radial gradient.
     RadialGradient {
         start: Point,
         end: Point,
@@ -534,12 +666,13 @@ impl<'a, 'b, R: Read> Drop for Points<'a, 'b, R> {
     }
 }
 
+/// A rectangle.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rect {
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 /// A stream of [`Rect`]s being read from TinyVG data.
@@ -581,9 +714,12 @@ impl<'a, 'b, R: Read> Drop for Rects<'a, 'b, R> {
     }
 }
 
+/// The direction of rotation of an arc.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ArcSweep {
+    /// The arc sweeps in the clockwise direction.
     Cw = 0,
+    /// The arc sweeps in the counter-clockwise (or anti-clockwise) direction.
     Ccw = 1,
 }
 
@@ -594,7 +730,10 @@ impl TryFrom<u8> for ArcSweep {
         match value {
             0 => Ok(ArcSweep::Cw),
             1 => Ok(ArcSweep::Ccw),
-            _ => Err(TinyVgError::InvalidData),
+            _ => Err(TinyVgError {
+                kind: ErrorKind::InvalidData,
+                msg: "unrecognized arc sweep value",
+            }),
         }
     }
 }
@@ -668,8 +807,11 @@ pub struct Segment {
     pub instrs: Vec<PathInstr>,
 }
 
+// This is the capacity used by the Zig implementation.
+const MAX_SEGMENTS: usize = 1024;
+
 pub struct Segments<'a, 'b, R: Read> {
-    remaining: u32,
+    lengths: arrayvec::IntoIter<u32, MAX_SEGMENTS>,
     reader: &'a mut CommandReader<'b, R>,
 }
 
@@ -677,19 +819,7 @@ impl<'a, 'b, R: Read> Iterator for Segments<'a, 'b, R> {
     type Item = Result<Segment>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining > 0 {
-            let segment = self.reader.read_segment();
-
-            if segment.is_ok() {
-                self.remaining -= 1;
-            } else {
-                self.reader.errored = true;
-            }
-
-            Some(segment)
-        } else {
-            None
-        }
+        self.lengths.next().map(|len| self.reader.read_segment(len))
     }
 }
 
@@ -782,7 +912,12 @@ impl TryFrom<u8> for CmdId {
             8 => OutlineFillPoly,
             9 => OutlineFillRects,
             10 => OutlineFillPath,
-            _ => return Err(TinyVgError::InvalidData),
+            _ => {
+                return Err(TinyVgError {
+                    kind: ErrorKind::InvalidData,
+                    msg: "unrecognized command tag",
+                });
+            }
         };
 
         Ok(cmd)
@@ -1158,14 +1293,18 @@ impl<'a, R: Read> CommandReader<'a, R> {
                 control: self.read_point()?,
                 to: self.read_point()?,
             },
-            _ => return Err(TinyVgError::InvalidData),
+            _ => {
+                return Err(TinyVgError {
+                    kind: ErrorKind::InvalidData,
+                    msg: "unrecognized path instruction tag",
+                });
+            }
         };
 
         Ok(PathInstr { kind, line_width })
     }
 
-    fn read_segment(&mut self) -> Result<Segment> {
-        let instr_count = self.tvg.reader.read_var_u32()? + 1;
+    fn read_segment(&mut self, instr_count: u32) -> Result<Segment> {
         let start = self.read_point()?;
         let instrs = iter::repeat_with(|| self.read_path_instr())
             .take(instr_count as usize)
@@ -1174,16 +1313,34 @@ impl<'a, R: Read> CommandReader<'a, R> {
         Ok(Segment { start, instrs })
     }
 
-    fn read_segments<'b>(&'b mut self, segment_count: u32) -> Segments<'b, 'a, R> {
-        Segments {
-            remaining: segment_count,
-            reader: self,
+    fn read_segments<'b>(&'b mut self, segment_count: u32) -> Result<Segments<'b, 'a, R>> {
+        let ct_usize: usize = segment_count
+            .try_into()
+            .expect("segment count overflows a usize");
+        if ct_usize > MAX_SEGMENTS {
+            return Err(TinyVgError {
+                kind: ErrorKind::Unsupported,
+                msg: "too many segments in path",
+            });
         }
+
+        let lengths: ArrayVec<u32, MAX_SEGMENTS> =
+            iter::repeat_with(|| self.tvg.reader.read_var_u32().map(|i| i + 1))
+                .take(ct_usize)
+                .collect::<Result<_>>()?;
+
+        Ok(Segments {
+            lengths: lengths.into_iter(),
+            reader: self,
+        })
     }
 
     pub fn read_cmd<'b>(&'b mut self) -> Result<Option<CmdReader<'b, 'a, R>>> {
         if self.errored {
-            return Err(TinyVgError::Fatal);
+            return Err(TinyVgError {
+                kind: ErrorKind::Fatal,
+                msg: "reader previously errored",
+            });
         }
 
         if self.tvg.commands_finished {
@@ -1222,7 +1379,7 @@ impl<'a, R: Read> CommandReader<'a, R> {
 
                 Some(CmdReader::FillPath {
                     fill_style: self.read_style(prim_style)?,
-                    segments: self.read_segments(segment_count),
+                    segments: self.read_segments(segment_count)?,
                 })
             }
 
@@ -1261,7 +1418,7 @@ impl<'a, R: Read> CommandReader<'a, R> {
                 Some(CmdReader::DrawPath {
                     line_style: self.read_style(prim_style)?,
                     width: self.read_unit()?,
-                    segments: self.read_segments(segment_count),
+                    segments: self.read_segments(segment_count)?,
                 })
             }
 
@@ -1300,7 +1457,7 @@ impl<'a, R: Read> CommandReader<'a, R> {
                     fill_style: self.read_style(prim_style)?,
                     line_style: self.read_style(line_style_id)?,
                     line_width: self.read_unit()?,
-                    segments: self.read_segments(segment_count),
+                    segments: self.read_segments(segment_count)?,
                 })
             }
         };
@@ -1329,7 +1486,10 @@ impl<R: Read> TinyVgReader<R> {
 
     pub fn read_header(&mut self) -> Result<TinyVgHeader> {
         match self.header {
-            Some(_) => Err(TinyVgError::BadPosition),
+            Some(_) => Err(TinyVgError {
+                kind: ErrorKind::BadPosition,
+                msg: "reader not positioned at beginning of data",
+            }),
             None => {
                 let header = read_header(&mut self.reader)?;
                 self.header = Some(header);
@@ -1347,11 +1507,19 @@ impl<R: Read> TinyVgReader<R> {
     ) -> Result<ColorTableEncoding<R, C>> {
         let header = match self.header {
             Some(header) => header,
-            None => return Err(TinyVgError::BadPosition),
+            None => {
+                return Err(TinyVgError {
+                    kind: ErrorKind::BadPosition,
+                    msg: "reader not positioned at beginning of color table",
+                });
+            }
         };
 
         if self.colors_read >= header.color_count {
-            return Err(TinyVgError::BadPosition);
+            return Err(TinyVgError {
+                kind: ErrorKind::BadPosition,
+                msg: "color table has already been read",
+            });
         }
 
         let enc = match header.encoding {
@@ -1369,11 +1537,19 @@ impl<R: Read> TinyVgReader<R> {
     pub fn read_commands(&mut self) -> Result<CommandReader<R>> {
         let header = match self.header {
             Some(header) => header,
-            None => return Err(TinyVgError::BadPosition),
+            None => {
+                return Err(TinyVgError {
+                    kind: ErrorKind::BadPosition,
+                    msg: "reader not positioned at beginning of commands",
+                });
+            }
         };
 
-        if self.colors_read < header.color_count {
-            return Err(TinyVgError::BadPosition);
+        if self.commands_finished {
+            return Err(TinyVgError {
+                kind: ErrorKind::BadPosition,
+                msg: "all commands have already been read",
+            });
         }
 
         Ok(CommandReader {
@@ -1401,13 +1577,19 @@ fn read_header<R: Read>(mut reader: R) -> Result<TinyVgHeader> {
     };
 
     if magic != MAGIC {
-        return Err(TinyVgError::InvalidData);
+        return Err(TinyVgError {
+            kind: ErrorKind::InvalidData,
+            msg: "incorrect magic number",
+        });
     }
 
     let version = reader.read_u8()?;
 
     if version != VERSION {
-        return Err(TinyVgError::InvalidData);
+        return Err(TinyVgError {
+            kind: ErrorKind::InvalidData,
+            msg: "incorrect version number",
+        });
     }
 
     let scale_enc_range = reader.read_u8()?;
@@ -1420,10 +1602,10 @@ fn read_header<R: Read>(mut reader: R) -> Result<TinyVgHeader> {
 
     let width = read_unit_fn(&mut reader)?
         .try_into()
-        .map_err(|_| TinyVgError::InvalidData)?;
+        .map_err(|_| ErrorKind::InvalidData)?;
     let height = read_unit_fn(&mut reader)?
         .try_into()
-        .map_err(|_| TinyVgError::InvalidData)?;
+        .map_err(|_| ErrorKind::InvalidData)?;
 
     let color_count = reader.read_var_u32()?;
 
@@ -1458,17 +1640,14 @@ impl<W: Write> TinyVgWriter<W> {
         let write_unit_fn = header.range.write_fn();
         write_unit_fn(
             &mut self.writer,
-            header
-                .width
-                .try_into()
-                .map_err(|_| TinyVgError::OutOfRange)?,
+            header.width.try_into().map_err(|_| ErrorKind::OutOfRange)?,
         )?;
         write_unit_fn(
             &mut self.writer,
             header
                 .height
                 .try_into()
-                .map_err(|_| TinyVgError::OutOfRange)?,
+                .map_err(|_| ErrorKind::OutOfRange)?,
         )?;
 
         Ok(ColorTableWriter {
@@ -1490,23 +1669,26 @@ impl<W: Write> ColorTableWriter<W> {
         C: ColorEncoding,
     {
         if C::tag() != self.header.encoding {
-            return Err(TinyVgError::InvalidData);
+            return Err(TinyVgError {
+                kind: ErrorKind::InvalidData,
+                msg: "color table writer encoding does not match header",
+            });
         }
 
-        let color_count: u32 = colors
-            .len()
-            .try_into()
-            .map_err(|_| TinyVgError::OutOfRange)?;
+        let color_count: u32 = colors.len().try_into().map_err(|_| ErrorKind::OutOfRange)?;
 
         self.writer.write_var_u32(color_count)?;
 
         let mut written: u32 = 0;
         for color in colors {
             color.write_table_entry(&mut self.writer)?;
-            written = written.checked_add(1).ok_or(TinyVgError::OutOfRange)?;
+            written = written.checked_add(1).ok_or(ErrorKind::OutOfRange)?;
 
             if written > color_count {
-                return Err(TinyVgError::InvalidData);
+                return Err(TinyVgError {
+                    kind: ErrorKind::InvalidData,
+                    msg: "number of colors written did not match provided iterator length",
+                });
             }
         }
 
@@ -1541,9 +1723,9 @@ impl<W: Write> CommandWriter<W> {
     }
 
     fn write_count(&mut self, count: usize) -> Result<()> {
-        let as_u32: u32 = count.try_into().map_err(|_| TinyVgError::OutOfRange)?;
+        let as_u32: u32 = count.try_into().map_err(|_| ErrorKind::OutOfRange)?;
         self.writer
-            .write_var_u32(as_u32.checked_sub(1).ok_or(TinyVgError::InvalidData)?)?;
+            .write_var_u32(as_u32.checked_sub(1).ok_or(ErrorKind::InvalidData)?)?;
 
         Ok(())
     }
@@ -1551,7 +1733,10 @@ impl<W: Write> CommandWriter<W> {
     const U6_MAX: u8 = (1 << 6) - 1;
     fn write_styled_count(&mut self, count: usize, style_id: StyleId) -> Result<()> {
         if count - 1 > Self::U6_MAX as usize {
-            return Err(TinyVgError::OutOfRange);
+            return Err(TinyVgError {
+                kind: ErrorKind::OutOfRange,
+                msg: "count too high for this command type",
+            });
         }
 
         self.writer
@@ -1620,7 +1805,7 @@ impl<W: Write> CommandWriter<W> {
         match style {
             Style::FlatColor { color } => {
                 if color >= self.color_count {
-                    return Err(TinyVgError::NoSuchColor);
+                    return Err(ErrorKind::NoSuchColor.into());
                 }
 
                 self.writer.write_var_u32(color)?;
@@ -1638,7 +1823,7 @@ impl<W: Write> CommandWriter<W> {
                 end_color,
             } => {
                 if start_color >= self.color_count || end_color >= self.color_count {
-                    return Err(TinyVgError::NoSuchColor);
+                    return Err(ErrorKind::NoSuchColor.into());
                 }
 
                 self.write_point(start)?;
