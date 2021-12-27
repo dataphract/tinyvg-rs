@@ -66,3 +66,20 @@ jobs:
         with:
           command: clippy
           args: --all-targets -- -D warnings
+
+  fuzz:
+    name: fuzz (build only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+      - run: git submodule update --init
+      - run: cargo install cargo-fuzz
+      - uses: actions-rs/cargo@v1
+        with:
+          command: fuzz
+          args: build
