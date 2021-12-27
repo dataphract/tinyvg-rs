@@ -495,7 +495,6 @@ impl CoordinateRange {
 
     fn read_reduced<R: Read>(reader: &mut R) -> io::Result<i32> {
         let v = reader.read_i8().map(i8::into)?;
-        println!("value: {}", v);
         Ok(v)
     }
 
