@@ -85,6 +85,8 @@ impl fmt::Display for TinyVgError {
     }
 }
 
+impl std::error::Error for TinyVgError {}
+
 impl From<ErrorKind> for TinyVgError {
     fn from(kind: ErrorKind) -> Self {
         TinyVgError { kind, msg: "" }
@@ -809,6 +811,7 @@ pub struct Segment {
 // This is the capacity used by the Zig implementation.
 const MAX_SEGMENTS: usize = 1024;
 
+/// An iterator over [`Segment`]s read from TinyVG data.
 pub struct Segments<'a, 'b, R: Read> {
     lengths: arrayvec::IntoIter<u32, MAX_SEGMENTS>,
     reader: &'a mut CommandReader<'b, R>,
@@ -827,13 +830,16 @@ pub struct Path {
     pub segments: Vec<Segment>,
 }
 
+/// A line segment.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Line {
+    /// The start point of the line segment.
     pub start: Point,
+    /// The end point of the line segment.
     pub end: Point,
 }
 
-/// A stream of [`Line`]s being read from TinyVG data.
+/// An iterator over [`Line`]s read from TinyVG data.
 pub struct Lines<'a, 'b, R: Read> {
     remaining: u32,
     reader: &'a mut CommandReader<'b, R>,
@@ -1481,6 +1487,7 @@ pub struct TinyVgReader<R: Read> {
 }
 
 impl<R: Read> TinyVgReader<R> {
+    /// Constructs a new `TinyVgReader` wrapping a reader.
     pub fn new(reader: R) -> TinyVgReader<R> {
         TinyVgReader {
             header: None,
@@ -1490,6 +1497,30 @@ impl<R: Read> TinyVgReader<R> {
         }
     }
 
+    /// Reads the TinyVG header.
+    ///
+    /// # Errors
+    ///
+    /// This method returns an error if the TinyVG header has already been read.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::fs::File;
+    /// use tinyvg::TinyVgReader;
+    ///
+    /// let mut r = TinyVgReader::new(File::open("example.tvg")?);
+    ///
+    /// // Reading the header at the start of the data succeeds.
+    /// assert!(r.read_header().is_ok());
+    ///
+    /// // Attempting to read the header again fails.
+    /// assert!(r.read_header().is_err());
+    ///
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn read_header(&mut self) -> Result<TinyVgHeader> {
         match self.header {
             Some(_) => Err(TinyVgError {
@@ -1504,6 +1535,29 @@ impl<R: Read> TinyVgReader<R> {
         }
     }
 
+    /// Begins reading the color table.
+    ///
+    /// The returned [`ColorTableEncoding`] can be pattern-matched to handle
+    /// each possible encoding differently. If this is not desired, the standard
+    /// encodings can be converted to RGBAF32 using
+    /// [`ColorTableEncoding::to_rgba_f32`].
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::fs::File;
+    /// use tinyvg::{RgbaF32, TinyVgReader};
+    ///
+    /// let mut r = TinyVgReader::new(File::open("example.tvg")?);
+    /// let header = r.read_header()?;
+    ///
+    /// let colors: Vec<RgbaF32> = r.read_color_table()?
+    ///     .to_rgba_f32()
+    ///     .collect::<Result<_, _>>()?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn read_color_table(&mut self) -> Result<ColorTableEncoding<R, ()>> {
         self.read_custom_color_table::<()>()
     }
