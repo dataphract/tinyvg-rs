@@ -125,7 +125,7 @@ trait ReadVarU32Ext: Read {
         // If the full 5 bytes are used, the high 4 bits of the 5th byte must be
         // 0b1000.
         let b = self.read_u8()?;
-        if b & 0xF0 != 0x80 {
+        if b & 0xF0 != 0x00 {
             return Err(TinyVgError {
                 kind: ErrorKind::InvalidData,
                 msg: "Invalid 5th byte in VarUInt encoding",
@@ -1157,6 +1157,14 @@ pub struct CommandReader<'a, R: Read> {
 }
 
 impl<'a, R: Read> CommandReader<'a, R> {
+    fn read_count(&mut self) -> Result<u32> {
+        let v = self.tvg.reader.read_var_u32()?;
+        v.checked_add(1).ok_or(TinyVgError {
+            kind: ErrorKind::OutOfRange,
+            msg: "count overflowed a u32",
+        })
+    }
+
     fn read_style(&mut self, id: StyleId) -> Result<Style> {
         let style = match id {
             StyleId::FlatColor => Style::FlatColor {
@@ -1324,10 +1332,9 @@ impl<'a, R: Read> CommandReader<'a, R> {
             });
         }
 
-        let lengths: ArrayVec<u32, MAX_SEGMENTS> =
-            iter::repeat_with(|| self.tvg.reader.read_var_u32().map(|i| i + 1))
-                .take(ct_usize)
-                .collect::<Result<_>>()?;
+        let lengths: ArrayVec<u32, MAX_SEGMENTS> = iter::repeat_with(|| self.read_count())
+            .take(ct_usize)
+            .collect::<Result<_>>()?;
 
         Ok(Segments {
             lengths: lengths.into_iter(),
@@ -1358,7 +1365,7 @@ impl<'a, R: Read> CommandReader<'a, R> {
             }
 
             CmdId::FillPoly => {
-                let point_count = self.tvg.reader.read_var_u32()? + 1;
+                let point_count = self.read_count()?;
                 Some(CmdReader::FillPoly {
                     fill_style: self.read_style(prim_style)?,
                     points: self.read_points(point_count),
@@ -1366,7 +1373,7 @@ impl<'a, R: Read> CommandReader<'a, R> {
             }
 
             CmdId::FillRects => {
-                let rect_count = self.tvg.reader.read_var_u32()? + 1;
+                let rect_count = self.read_count()?;
 
                 Some(CmdReader::FillRects {
                     fill_style: self.read_style(prim_style)?,
@@ -1375,7 +1382,7 @@ impl<'a, R: Read> CommandReader<'a, R> {
             }
 
             CmdId::FillPath => {
-                let segment_count = self.tvg.reader.read_var_u32()? + 1;
+                let segment_count = self.read_count()?;
 
                 Some(CmdReader::FillPath {
                     fill_style: self.read_style(prim_style)?,
@@ -1384,7 +1391,7 @@ impl<'a, R: Read> CommandReader<'a, R> {
             }
 
             CmdId::DrawLines => {
-                let line_count = self.tvg.reader.read_var_u32()? + 1;
+                let line_count = self.read_count()?;
 
                 Some(CmdReader::DrawLines {
                     line_style: self.read_style(prim_style)?,
@@ -1394,7 +1401,7 @@ impl<'a, R: Read> CommandReader<'a, R> {
             }
 
             CmdId::DrawLoop => {
-                let point_count = self.tvg.reader.read_var_u32()? + 1;
+                let point_count = self.read_count()?;
                 Some(CmdReader::DrawLoop {
                     line_style: self.read_style(prim_style)?,
                     width: self.read_unit()?,
@@ -1403,7 +1410,7 @@ impl<'a, R: Read> CommandReader<'a, R> {
             }
 
             CmdId::DrawStrip => {
-                let point_count = self.tvg.reader.read_var_u32()? + 1;
+                let point_count = self.read_count()?;
 
                 Some(CmdReader::DrawStrip {
                     line_style: self.read_style(prim_style)?,
@@ -1413,7 +1420,7 @@ impl<'a, R: Read> CommandReader<'a, R> {
             }
 
             CmdId::DrawPath => {
-                let segment_count = self.tvg.reader.read_var_u32()? + 1;
+                let segment_count = self.read_count()?;
 
                 Some(CmdReader::DrawPath {
                     line_style: self.read_style(prim_style)?,
@@ -1732,7 +1739,12 @@ impl<W: Write> CommandWriter<W> {
 
     const U6_MAX: u8 = (1 << 6) - 1;
     fn write_styled_count(&mut self, count: usize, style_id: StyleId) -> Result<()> {
-        if count - 1 > Self::U6_MAX as usize {
+        let count = count.checked_sub(1).ok_or(TinyVgError {
+            kind: ErrorKind::InvalidData,
+            msg: "count must be at least 1",
+        })?;
+
+        if count > Self::U6_MAX as usize {
             return Err(TinyVgError {
                 kind: ErrorKind::OutOfRange,
                 msg: "count too high for this command type",
@@ -1740,7 +1752,7 @@ impl<W: Write> CommandWriter<W> {
         }
 
         self.writer
-            .write_u8((style_id as u8) << 6 | (count as u8 - 1))?;
+            .write_u8((style_id as u8) << 6 | (count as u8))?;
 
         Ok(())
     }
@@ -2104,22 +2116,28 @@ trait Uint:
     BitAnd<Output = Self> + Sized + Shl<u8, Output = Self> + Shr<u8, Output = Self> + Sub<Output = Self>
 {
     const ONE: Self;
+    const BITS: u32;
 
     fn bits(self, ofs: u8, width: u8) -> Self {
+        assert!((ofs as u32) < Self::BITS);
+        assert!((ofs as u32 + width as u32) <= Self::BITS);
         self.shr(ofs) & (Self::ONE.shl(width) - Self::ONE)
     }
 }
 
 impl Uint for u8 {
     const ONE: Self = 1;
+    const BITS: u32 = u8::BITS;
 }
 
 impl Uint for u16 {
     const ONE: Self = 1;
+    const BITS: u32 = u16::BITS;
 }
 
 impl Uint for u32 {
     const ONE: Self = 1;
+    const BITS: u32 = u32::BITS;
 }
 
 #[cfg(test)]
@@ -2134,5 +2152,28 @@ mod tests {
         assert_eq!(value.bits(8, 16), 0xADBE);
         assert_eq!(value.bits(16, 16), 0xDEAD);
         assert_eq!(value.bits(1, 31), 0x6F56DF77);
+    }
+
+    #[test]
+    fn roundtrip_var_u32() {
+        let values = [
+            0,
+            (1 << 7) - 1,
+            1 << 7,
+            (1 << 14) - 1,
+            1 << 14,
+            (1 << 21) - 1,
+            1 << 21,
+            (1 << 28) - 1,
+            1 << 28,
+            u32::MAX,
+        ];
+
+        let mut buf = [0u8; 5];
+        for value in values {
+            (&mut buf[..]).write_var_u32(value).unwrap();
+            let read = (&buf[..]).read_var_u32().unwrap();
+            assert_eq!(read, value);
+        }
     }
 }
