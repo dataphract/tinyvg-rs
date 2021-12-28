@@ -622,10 +622,14 @@ impl Style {
     }
 }
 
+/// A point in 2-D space.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Point {
-    x: f32,
-    y: f32,
+    /// The point's x-coordinate.
+    pub x: f32,
+
+    /// The point's y-coordinate.
+    pub y: f32,
 }
 
 /// A stream of [`Point`]s being read from TinyVG data.
