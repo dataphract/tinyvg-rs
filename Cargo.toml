@@ -5,9 +5,15 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = ["render"]
+render = ["cgmath"]
+
 [dependencies]
 arrayvec = "0.7"
 byteorder = "1"
+cgmath = { version = "0.18", optional = true }
+piet-common = { version = "0.5", features = ["png"] }
 
 [dev-dependencies]
 pretty_assertions = "1"

@@ -20,21 +20,21 @@ pub fn main() -> tinyvg::Result<()> {
     let mut cmd_writer = table_writer.write_color_table(
         [
             Rgba8888 {
-                red: 127,
+                red: 192,
                 green: 0,
                 blue: 0,
                 alpha: 255,
             },
             Rgba8888 {
                 red: 0,
-                green: 127,
+                green: 192,
                 blue: 0,
                 alpha: 255,
             },
             Rgba8888 {
                 red: 0,
                 green: 0,
-                blue: 127,
+                blue: 192,
                 alpha: 255,
             },
         ]
@@ -60,7 +60,7 @@ pub fn main() -> tinyvg::Result<()> {
                     large_arc: true,
                     sweep: ArcSweep::Cw,
                     radius: 50.0,
-                    to: Point { x: 130.0, y: 60.0 },
+                    to: Point { x: 180.0, y: 10.0 },
                 },
                 line_width: None,
             }],

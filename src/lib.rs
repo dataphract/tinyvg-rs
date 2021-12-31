@@ -285,6 +285,24 @@ pub struct RgbaF32 {
     alpha: f32,
 }
 
+impl RgbaF32 {
+    pub fn red(&self) -> f32 {
+        self.red
+    }
+
+    pub fn green(&self) -> f32 {
+        self.green
+    }
+
+    pub fn blue(&self) -> f32 {
+        self.blue
+    }
+
+    pub fn alpha(&self) -> f32 {
+        self.alpha
+    }
+}
+
 impl From<Rgba8888> for RgbaF32 {
     fn from(c: Rgba8888) -> Self {
         RgbaF32 {
@@ -623,7 +641,7 @@ impl Style {
 }
 
 /// A point in 2-D space.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Point {
     /// The point's x-coordinate.
     pub x: f32,
